@@ -33,7 +33,31 @@ The `--top` (default 3) attributes with the highest k-NN blindness are marked `s
 - `word_count` uses MAPLE's binning, `round(words / 50) * 50`.
 - 20 repeats of random half/half splits; the table reports mean ± sd.
 
-### Run
+### Run on the cluster
+
+`/home` is for personal files only; large regenerable data goes in `/data`.
+Keep the code in `/home`, and put the MAPLE data, the Hugging Face model cache, the embedding cache and the results in `/data`:
+
+```bash
+export PE_DATA=/data/$USER/PE-metadata          # embedding cache + results
+export HF_HOME=/data/$USER/hf_cache              # sentence-t5-base weights
+mkdir -p $PE_DATA $HF_HOME
+git clone https://github.com/elichien-google/MAPLE.git $PE_DATA/MAPLE
+
+# RTX Pro 6000 (Blackwell) needs a CUDA 12.8+ build of PyTorch
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+pip install -r requirements.txt
+
+for n in 2000 5000 0; do                         # 0 = all 28,846 rows
+  CUDA_VISIBLE_DEVICES=0 python run.py --csv $PE_DATA/MAPLE/biorxiv/biorxiv_train_metadata.csv \
+    --n $n --batch_size 256 --out $PE_DATA/results/n$n
+done
+```
+
+Running three n values checks whether the top-3 ranking depends on sample size: k-NN agreement rises as points get denser.
+At full n the slow part is the probe, which runs on CPU; add `--repeats 5` there.
+
+### Run (local)
 
 ```bash
 pip install -r requirements.txt
@@ -42,9 +66,9 @@ python -m tests.test_toy                                           # sanity chec
 python run.py --csv ../MAPLE/biorxiv/biorxiv_train_metadata.csv --n 2000
 ```
 
-Embedding 2k abstracts takes a few minutes on CPU or Apple MPS. Embeddings are cached in `cache/`.
+Embedding 2k abstracts takes a few minutes on CPU or Apple MPS. Embeddings are cached in `$PE_DATA/cache/` (default `./cache/`).
 
-Outputs in `results/`:
+Outputs in `$PE_DATA/results/` (or `--out`):
 
 - `summary.csv`: per-attribute scores and the selected attributes
 - `per_repeat.csv`: raw scores for every split

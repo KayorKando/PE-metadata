@@ -2,9 +2,13 @@
 
 Example:
     python run.py --csv ../MAPLE/biorxiv/biorxiv_train_metadata.csv --n 2000
+
+Large, regenerable files (embedding cache, results) go under $PE_DATA
+(default: current directory). On the cluster set PE_DATA=/data/<user>/PE-metadata.
 """
 import argparse
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -26,7 +30,10 @@ def main():
     p.add_argument("--model", default=DEFAULT_MODEL)
     p.add_argument("--max_seq_length", type=int, default=1024)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--out", default="results")
+    data_root = Path(os.environ.get("PE_DATA", "."))
+    p.add_argument("--out", default=str(data_root / "results"))
+    p.add_argument("--cache_dir", default=str(data_root / "cache"))
+    p.add_argument("--batch_size", type=int, default=32, help="embedding batch size")
     args = p.parse_args()
 
     df = pd.read_csv(args.csv)
@@ -34,7 +41,8 @@ def main():
     if args.n and args.n < len(df):
         df = df.sample(n=args.n, random_state=args.seed).reset_index(drop=True)
     labels = clean_labels(df, args.attributes)
-    X = embed(df["text"].astype(str).tolist(), args.model, args.max_seq_length)
+    X = embed(df["text"].astype(str).tolist(), args.model, args.max_seq_length,
+              batch_size=args.batch_size, cache_dir=args.cache_dir)
 
     per_repeat = run(X, labels, repeats=args.repeats, k=args.k, seed=args.seed)
     summary, rho, pval = summarize(per_repeat, labels, top=args.top)
