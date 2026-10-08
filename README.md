@@ -44,6 +44,10 @@ export HF_HOME=/data/$USER/hf_cache              # sentence-t5-base weights
 mkdir -p $PE_DATA $HF_HOME
 git clone https://github.com/elichien-google/MAPLE.git $PE_DATA/MAPLE
 
+# virtual environment, kept in /data (not /home)
+python -m venv /data/$USER/envs/pe-metadata
+source /data/$USER/envs/pe-metadata/bin/activate
+
 # RTX Pro 6000 (Blackwell) needs a CUDA 12.8+ build of PyTorch
 pip install torch --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
@@ -60,6 +64,8 @@ At full n the slow part is the probe, which runs on CPU; add `--repeats 5` there
 ### Run (local)
 
 ```bash
+python -m venv .venv                                               # virtual environment
+source .venv/bin/activate
 pip install -r requirements.txt
 git clone https://github.com/elichien-google/MAPLE.git ../MAPLE   # data
 python -m tests.test_toy                                           # sanity check, ~10 s
