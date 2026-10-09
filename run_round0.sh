@@ -32,10 +32,21 @@ if ! "$MAPLE_ENV/bin/python" -c "import torch, vllm, pe, sentence_transformers" 
   stamp "installing MAPLE env in $MAPLE_ENV (vllm, private-evolution); takes a few minutes"
   [ -x "$MAPLE_ENV/bin/python" ] || python3 -m venv "$MAPLE_ENV"
   "$MAPLE_ENV/bin/pip" install -q -U pip
-  "$MAPLE_ENV/bin/pip" install vllm==0.10.1.1
+  "$MAPLE_ENV/bin/pip" install vllm==0.10.1.1 --extra-index-url https://download.pytorch.org/whl/cu128
   "$MAPLE_ENV/bin/pip" install "private-evolution[text] @ git+https://github.com/microsoft/DPSDA.git" datasets==4.0.0
 fi
 MPY=$MAPLE_ENV/bin/python
+# vllm 0.10.1.1 pins torch 2.7.1; the PyPI build of that is CUDA 12.6 and has no
+# Blackwell (sm_120) kernels. Swap in the CUDA 12.8 build of the same versions.
+has_arch() {
+  CUDA_VISIBLE_DEVICES=${G[0]} "$MPY" -c "import torch; c=torch.cuda.get_device_capability(0); \
+import sys; sys.exit(0 if f'sm_{c[0]}{c[1]}' in torch.cuda.get_arch_list() else 1)" 2>/dev/null
+}
+if ! has_arch; then
+  stamp "torch build lacks this GPU's kernels; reinstalling torch 2.7.1 (CUDA 12.8)"
+  "$MAPLE_ENV/bin/pip" install --force-reinstall torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 \
+    --index-url https://download.pytorch.org/whl/cu128
+fi
 CUDA_VISIBLE_DEVICES=${G[0]} "$MPY" - <<'PY'
 import torch
 cap = torch.cuda.get_device_capability(0)
