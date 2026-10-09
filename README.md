@@ -197,3 +197,5 @@ CUDA_VISIBLE_DEVICES=1 python vote_correction.py \
 
 This uses private data, so it is a non-private diagnostic.
 
+**Requested labels can fake distortion.** The vote picks texts by what they actually say; if the LLM did not follow the requested label, the requested labels of the picked texts can look skewed even when the content is right (`word_count_requested` is the clear case). `--probe_labels` re-scores the content attributes with a measured-label proxy: a linear probe trained on half of the private set (Gemini labels) labels the other half (target) and the whole pool, so target, random and vote all pass through the same classifier. Extra outputs: `vote_correction_probe_labels.csv` and `requested_vs_probe_labels.csv` (held-out probe κ, the probe's own marginal bias, requested-vs-predicted κ in the pool = how well the LLM followed each request, and the corrections under both label sources).
+

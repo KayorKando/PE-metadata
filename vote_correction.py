@@ -88,9 +88,14 @@ def select_top_k(hist, K, noise, rng):
     return np.argsort(h)[::-1][:K]  # as in MAPLE get_next_iteration(mode='rank')
 
 
-def analyze(X_priv, X_pool, lab_priv, lab_pool, K=2000, noises=(0.0,), seeds=10, seed=0):
+def analyze(X_priv, X_pool, lab_priv, lab_pool, K=2000, noises=(0.0,), seeds=10, seed=0, lab_target=None):
     """lab_pool[a] is compared with lab_priv[a] (or lab_priv['word_count'] for
-    word_count_requested)."""
+    word_count_requested). All private points vote. With lab_target, labels are
+    compared with lab_target instead (e.g. probe predictions on held-out private
+    points) and the floor is drawn from it. The vote and random selections only
+    depend on seed, so two calls with the same seed use identical selections."""
+    target = lab_priv if lab_target is None else lab_target
+    n_target = len(next(iter(target.values())))
     rng = np.random.default_rng(seed)
     nn = nearest_pool_index(X_priv, X_pool)
     hist = np.bincount(nn, minlength=len(X_pool))
@@ -100,11 +105,11 @@ def analyze(X_priv, X_pool, lab_priv, lab_pool, K=2000, noises=(0.0,), seeds=10,
         reps = 1 if s == 0 else seeds
         sel_vote[s] = [select_top_k(hist, K, s, rng) for _ in range(reps)]
     sel_rand = [rng.choice(len(X_pool), K, replace=False) for _ in range(seeds)]
-    sel_floor = [rng.choice(len(X_priv), K, replace=False) for _ in range(seeds)]
+    sel_floor = [rng.choice(n_target, min(K, n_target), replace=False) for _ in range(seeds)]
 
     rows = []
     for a, y_pool in lab_pool.items():
-        y_priv = lab_priv["word_count" if a == "word_count_requested" else a]
+        y_priv = target["word_count" if a == "word_count_requested" else a]
         r = dict(attribute=a, kind="length" if a in LENGTH_ATTRS else "content",
                  jsd_pool=jsd(y_pool, y_priv))
         rand = [jsd(y_pool[i], y_priv) for i in sel_rand]
@@ -126,6 +131,36 @@ def analyze(X_priv, X_pool, lab_priv, lab_pool, K=2000, noises=(0.0,), seeds=10,
                  max_votes=int(hist.max()),
                  votes_held_by_top_K=float(np.sort(hist)[::-1][:K].sum() / hist.sum()))
     return pd.DataFrame(rows).set_index("attribute"), stats, hist
+
+
+def probe_relabel(X_priv, lab_priv, X_pool, lab_pool_req, attrs, seed=0, C=1.0):
+    """Measured-label proxy for the pool: train a linear probe per attribute on half
+    of the private set (Gemini labels), then label the other private half (target)
+    and the whole pool with it. Random, vote and target all pass through the same
+    classifier, so its marginal bias largely cancels in the comparison."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import cohen_kappa_score
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    rng = np.random.default_rng(seed + 12345)
+    perm = rng.permutation(len(X_priv))
+    tr, ho = perm[: len(perm) // 2], perm[len(perm) // 2:]
+    target, pool_pred, diag = {}, {}, []
+    for a in attrs:
+        y = lab_priv[a]
+        clf = make_pipeline(StandardScaler(), LogisticRegression(C=C, max_iter=2000, random_state=seed))
+        clf.fit(X_priv[tr], y[tr])
+        target[a] = clf.predict(X_priv[ho])
+        pool_pred[a] = clf.predict(X_pool)
+        d = dict(attribute=a,
+                 heldout_kappa=float(cohen_kappa_score(y[ho], target[a])),
+                 heldout_marginal_jsd=jsd(target[a], y[ho]))  # classifier's own marginal bias
+        if a in lab_pool_req:  # does the generated text match the requested label?
+            d["pool_requested_vs_predicted_kappa"] = float(cohen_kappa_score(lab_pool_req[a], pool_pred[a]))
+        diag.append(d)
+        print(f"probe {a}: held-out kappa {diag[-1]['heldout_kappa']:.3f}", flush=True)
+    return target, pool_pred, pd.DataFrame(diag).set_index("attribute")
 
 
 def plot(df, noises, path):
@@ -160,6 +195,8 @@ def main():
     p.add_argument("--noises", type=float, nargs="+", default=DEFAULT_NOISES)
     p.add_argument("--seeds", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--probe_labels", action="store_true",
+                   help="also score content attributes with probe-predicted (measured-label proxy) labels")
     p.add_argument("--model", default="sentence-t5-base")
     p.add_argument("--max_seq_length", type=int, default=1024)
     p.add_argument("--batch_size", type=int, default=256)
@@ -201,6 +238,22 @@ def main():
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+
+    if args.probe_labels:
+        content = [a for a in BIORXIV_ATTRIBUTES if a not in LENGTH_ATTRS]
+        target, pool_pred, diag = probe_relabel(X_priv, lab_priv, X_pool, lab_pool, content, seed=args.seed)
+        dfp, _, _ = analyze(X_priv, X_pool, lab_priv, pool_pred, K=args.K, noises=args.noises,
+                            seeds=args.seeds, seed=args.seed, lab_target=target)
+        dfp = dfp.join(diag).sort_values("correction_0")
+        dfp.to_csv(out / "vote_correction_probe_labels.csv")
+        req = df.loc[dfp.index, [f"correction_{s:g}" for s in args.noises]].add_prefix("requested_")
+        cmp = pd.concat([dfp[["heldout_kappa", "heldout_marginal_jsd", "pool_requested_vs_predicted_kappa",
+                              "jsd_random", "jsd_floor", "jsd_vote_0"]],
+                         dfp[[f"correction_{s:g}" for s in args.noises]].add_prefix("probe_"), req], axis=1)
+        cmp.to_csv(out / "requested_vs_probe_labels.csv")
+        pd.set_option("display.width", 250)
+        print("\n=== content attributes: correction with probe-predicted labels vs requested labels ===")
+        print(cmp.round(3).to_string())
     df = df.sort_values("correction_0")
     df.to_csv(out / "vote_correction.csv")
     np.save(out / "vote_histogram.npy", hist)
