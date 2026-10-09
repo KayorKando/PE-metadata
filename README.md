@@ -144,6 +144,12 @@ If a CSV has text but no labels, annotate it with MAPLE's own script, `MAPLE/bio
 
 ### Why is ρ(k-NN, probe) lower on the round-0 pool? (diagnostics)
 
+One command (runs all three checks below, ~GPUs 1 and 2, writes everything to `$PE_DATA/results/rho_diag_eps4.0/`, summary in `ALL.txt`):
+
+```bash
+tmux new -d -s rhodiag "bash ~/PE-metadata/run_rho_diag.sh"
+```
+
 Three checks, cheapest first:
 
 ```bash
