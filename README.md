@@ -141,3 +141,53 @@ CUDA_VISIBLE_DEVICES=1 python run.py --csv $PE_DATA/round0/eps4.0/pool.csv --n 0
 ### Getting labels for a new CSV
 
 If a CSV has text but no labels, annotate it with MAPLE's own script, `MAPLE/biorxiv/utility_eval/extract_metadata.py` (Gemini 2.5 flash-lite, MAPLE schema). It writes the labels as `map_<attribute>` columns; drop the `map_` prefix before running `run.py`.
+
+### Why is ρ(k-NN, probe) lower on the round-0 pool? (diagnostics)
+
+Three checks, cheapest first:
+
+```bash
+export PE_DATA=/data/$USER/PE-metadata HF_HOME=/data/$USER/hf_cache
+source /data/$USER/envs/pe-metadata/bin/activate
+POOL=$PE_DATA/round0/eps4.0/pool.csv
+ATTRS="primary_research_area model_organism experimental_approach dominant_data_type \
+       research_focus_scale disease_mention sample_size research_goal word_count word_count_requested"
+
+# 1. Is 0.95 vs 0.64 a real difference over 8 attributes? Which attributes move? (CPU, seconds)
+python compare_rho.py --a $PE_DATA/results/n0/summary.csv --b $PE_DATA/results/round0_eps4.0/summary.csv \
+    --label_a private --label_b pool
+
+# 2. Twins: same random split as before, plus twin_rate; then a group split.
+CUDA_VISIBLE_DEVICES=1 python run.py --csv $POOL --n 0 --repeats 5 --attributes $ATTRS --batch_size 256 \
+    --group_cols requested --exclude_from_rho word_count word_count_requested \
+    --out $PE_DATA/results/round0_eps4.0_twinrate
+CUDA_VISIBLE_DEVICES=1 python run.py --csv $POOL --n 0 --repeats 5 --attributes $ATTRS --batch_size 256 \
+    --group_cols requested --group_split --exclude_from_rho word_count word_count_requested \
+    --out $PE_DATA/results/round0_eps4.0_groupsplit
+python compare_rho.py --a $PE_DATA/results/n0/summary.csv --b $PE_DATA/results/round0_eps4.0_groupsplit/summary.csv \
+    --label_a private --label_b pool_groupsplit
+
+# 3. Are the attributes less correlated with each other in the pool? (CPU)
+python label_mi.py --private $PE_DATA/MAPLE/biorxiv/biorxiv_train_metadata.csv --pool $POOL \
+    --out $PE_DATA/results/label_mi
+```
+
+## Experiment 1b: does the vote correct each attribute?
+
+Experiment 1 measures a proxy (5-NN agreement). Blindness alone does not create drift: a vote that ignores an attribute picks at random with respect to it and keeps its distribution. What blindness removes is the pull back toward the private distribution when the generator's pool is off.
+`vote_correction.py` runs MAPLE's real vote (each private point votes for its nearest pool point, optional Gaussian noise, keep the top K = 2000) on the round-0 pool and reports, per attribute, how much of the gap to the private distribution the vote closes:
+
+`correction = (JSD_random − JSD_vote) / (JSD_random − JSD_floor)`: 0 = no better than a blind random pick, 1 = as good as a perfect sample of size K, NaN = nothing to correct.
+
+Noise multipliers default to MAPLE's ε = ∞ / 4 / 2 / 1 values. Embeddings come from the Experiment 1 cache.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python vote_correction.py \
+  --private_csv $PE_DATA/MAPLE/biorxiv/biorxiv_train_metadata.csv \
+  --pool_csv $PE_DATA/round0/eps4.0/pool.csv \
+  --exp1_summary $PE_DATA/results/round0_eps4.0/summary.csv \
+  --out $PE_DATA/results/vote_correction_eps4.0
+```
+
+This uses private data, so it is a non-private diagnostic.
+
