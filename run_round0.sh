@@ -53,6 +53,17 @@ if ! "$MPY" -c "import transformers, sys; sys.exit(0 if int(transformers.__versi
   stamp "transformers >= 5 is incompatible with vllm 0.10.1.1; installing 4.55.4"
   "$MAPLE_ENV/bin/pip" install "transformers==4.55.4"
 fi
+# vllm 0.10.1.1 pins numba 0.61.2, which only supports numpy <= 2.2; other
+# packages may have pulled a newer numpy in. The engine imports numba lazily,
+# so it only failed inside the worker process.
+if ! "$MPY" -c "import numba" >/dev/null 2>&1; then
+  stamp "numba import fails (numpy too new for numba 0.61.2); installing numpy<2.3"
+  "$MPY" -c "import numba" 2>&1 | tail -n 2 || true
+  "$MAPLE_ENV/bin/pip" install "numpy<2.3" "numba==0.61.2"
+fi
+# Import the modules the vLLM engine worker loads, so import errors show up here
+# instead of as "Engine core initialization failed".
+"$MPY" -c "import vllm.v1.worker.gpu_model_runner, vllm.v1.worker.gpu_worker; print('vllm worker imports ok')"
 CUDA_VISIBLE_DEVICES=${G[0]} "$MPY" - <<'PY'
 import torch
 cap = torch.cuda.get_device_capability(0)
