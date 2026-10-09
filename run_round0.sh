@@ -47,10 +47,18 @@ if ! has_arch; then
   "$MAPLE_ENV/bin/pip" install --force-reinstall torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 \
     --index-url https://download.pytorch.org/whl/cu128
 fi
+# vllm 0.10.1.1 calls tokenizer APIs that transformers 5.x removed
+# (e.g. all_special_tokens_extended); other packages may have pulled 5.x in.
+if ! "$MPY" -c "import transformers, sys; sys.exit(0 if int(transformers.__version__.split('.')[0]) < 5 else 1)"; then
+  stamp "transformers >= 5 is incompatible with vllm 0.10.1.1; installing 4.55.4"
+  "$MAPLE_ENV/bin/pip" install "transformers==4.55.4"
+fi
 CUDA_VISIBLE_DEVICES=${G[0]} "$MPY" - <<'PY'
 import torch
 cap = torch.cuda.get_device_capability(0)
 arch = f"sm_{cap[0]}{cap[1]}"
+import transformers, vllm
+print("transformers", transformers.__version__, "vllm", vllm.__version__)
 print("torch", torch.__version__, "GPU", torch.cuda.get_device_name(0), arch)
 assert arch in torch.cuda.get_arch_list(), f"this torch build has no {arch} kernels: {torch.cuda.get_arch_list()}"
 PY
