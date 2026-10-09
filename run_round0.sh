@@ -27,12 +27,13 @@ stamp() { echo "[$(date '+%F %T')] $*"; }
 # --- 0. checks and MAPLE env (vLLM + private-evolution) ---
 [ -d "$MAPLE_DIR/biorxiv" ] || git clone https://github.com/elichien-google/MAPLE.git "$MAPLE_DIR"
 [ -x "$PE_ENV/bin/python" ] || { echo "missing $PE_ENV (Experiment 1 env)"; exit 1; }
-if [ ! -x "$MAPLE_ENV/bin/python" ]; then
-  stamp "creating $MAPLE_ENV"
-  python3 -m venv "$MAPLE_ENV"
+# Install when the env is missing OR incomplete (e.g. an earlier install was interrupted).
+if ! "$MAPLE_ENV/bin/python" -c "import torch, vllm, pe, sentence_transformers" >/dev/null 2>&1; then
+  stamp "installing MAPLE env in $MAPLE_ENV (vllm, private-evolution); takes a few minutes"
+  [ -x "$MAPLE_ENV/bin/python" ] || python3 -m venv "$MAPLE_ENV"
   "$MAPLE_ENV/bin/pip" install -q -U pip
-  "$MAPLE_ENV/bin/pip" install -q vllm==0.10.1.1
-  "$MAPLE_ENV/bin/pip" install -q "private-evolution[text] @ git+https://github.com/microsoft/DPSDA.git" datasets==4.0.0
+  "$MAPLE_ENV/bin/pip" install vllm==0.10.1.1
+  "$MAPLE_ENV/bin/pip" install "private-evolution[text] @ git+https://github.com/microsoft/DPSDA.git" datasets==4.0.0
 fi
 MPY=$MAPLE_ENV/bin/python
 CUDA_VISIBLE_DEVICES=${G[0]} "$MPY" - <<'PY'
