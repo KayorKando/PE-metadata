@@ -199,3 +199,26 @@ This uses private data, so it is a non-private diagnostic.
 
 **Requested labels can fake distortion.** The vote picks texts by what they actually say; if the LLM did not follow the requested label, the requested labels of the picked texts can look skewed even when the content is right (`word_count_requested` is the clear case). `--probe_labels` re-scores the content attributes with a measured-label proxy: a linear probe trained on half of the private set (Gemini labels) labels the other half (target) and the whole pool, so target, random and vote all pass through the same classifier. Extra outputs: `vote_correction_probe_labels.csv` and `requested_vs_probe_labels.csv` (held-out probe κ, the probe's own marginal bias, requested-vs-predicted κ in the pool = how well the LLM followed each request, and the corrections under both label sources).
 
+### Gemini labels for the pool (no circularity)
+
+Probe labels come from φ, the same embedding the vote uses. `annotate_gemini.py` labels the pool with Gemini instead, using MAPLE's own annotation prompt (read from `MAPLE/biorxiv/utility_eval/extract_metadata.py`), model (`gemini-2.5-flash-lite`) and temperature (1.0), i.e. the same annotator as the private labels. It runs requests in parallel, retries, and keeps a resumable cache (`<out>.jsonl`).
+
+Size of a full pool run: 14,000 requests, roughly 17M input and 2M output tokens.
+
+```bash
+pip install google-genai                      # in the pe-metadata env
+export GEMINI_API_KEY=...                     # keep it out of the command line
+python annotate_gemini.py --csv $PE_DATA/round0/eps4.0/pool.csv --maple_dir $PE_DATA/MAPLE \
+  --out $PE_DATA/round0/eps4.0/pool_gemini.csv --limit 20          # quick check
+python annotate_gemini.py --csv $PE_DATA/round0/eps4.0/pool.csv --maple_dir $PE_DATA/MAPLE \
+  --out $PE_DATA/round0/eps4.0/pool_gemini.csv                     # full run (resumes; --retry_errors retries failures)
+
+CUDA_VISIBLE_DEVICES=1 python vote_correction.py \
+  --private_csv $PE_DATA/MAPLE/biorxiv/biorxiv_train_metadata.csv \
+  --pool_csv $PE_DATA/round0/eps4.0/pool.csv \
+  --gemini_csv $PE_DATA/round0/eps4.0/pool_gemini.csv \
+  --exp1_summary $PE_DATA/results/round0_eps4.0/summary.csv \
+  --out $PE_DATA/results/vote_correction_eps4.0_gemini
+```
+
+Extra outputs: `vote_correction_gemini_labels.csv` and `requested_vs_gemini_labels.csv` (LLM compliance κ = requested vs Gemini label, and the corrections under both label sources).

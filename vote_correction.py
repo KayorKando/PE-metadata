@@ -52,8 +52,13 @@ LENGTH_ATTRS = {"word_count", "word_count_requested"}
 DEFAULT_NOISES = [0.0, 2.5787580697142025, 4.7482491352519505, 6.869194837509232]
 
 
+MISSING = "__missing__"  # failed annotation; left out of the distributions
+
+
 def jsd(a, b):
-    """MAPLE's compute_category_jsd on two label arrays."""
+    """MAPLE's compute_category_jsd on two label arrays (MISSING entries dropped)."""
+    a = [x for x in a if x != MISSING]
+    b = [x for x in b if x != MISSING]
     ca, cb = Counter(a), Counter(b)
     cats = sorted(set(ca) | set(cb))
     pa = np.array([ca.get(c, 0) for c in cats], float) / len(a)
@@ -195,6 +200,9 @@ def main():
     p.add_argument("--noises", type=float, nargs="+", default=DEFAULT_NOISES)
     p.add_argument("--seeds", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--gemini_csv", default=None,
+                   help="annotate_gemini.py output for the pool (map_<attr> columns): score content "
+                        "attributes with Gemini labels, the same annotator as the private labels")
     p.add_argument("--probe_labels", action="store_true",
                    help="also score content attributes with probe-predicted (measured-label proxy) labels")
     p.add_argument("--model", default="sentence-t5-base")
@@ -239,8 +247,39 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
+    content = [a for a in BIORXIV_ATTRIBUTES if a not in LENGTH_ATTRS]
+    corr_cols = [f"correction_{s:g}" for s in args.noises]
+    if args.gemini_csv:
+        from sklearn.metrics import cohen_kappa_score
+        g = pd.read_csv(args.gemini_csv)
+        g = g[g["text"].notna()].reset_index(drop=True)
+        assert len(g) == len(pool) and (g["text"].astype(str).values == pool["text"].astype(str).values).all(), \
+            "gemini_csv rows must match pool_csv rows"
+        gl = g[[f"map_{a}" for a in content]].rename(columns=lambda c: c[len("map_"):])
+        missing = gl.isna().all(axis=1).to_numpy()
+        lab_gem = clean_labels(gl, content)
+        for a in content:
+            lab_gem[a] = np.where(missing, MISSING, lab_gem[a])
+        dfg, _, _ = analyze(X_priv, X_pool, lab_priv, lab_gem, K=args.K, noises=args.noises,
+                            seeds=args.seeds, seed=args.seed)
+        ok = ~missing
+        dfg["llm_compliance_kappa"] = [float(cohen_kappa_score(lab_pool[a][ok], lab_gem[a][ok])) for a in dfg.index]
+        dfg.sort_values("correction_0").to_csv(out / "vote_correction_gemini_labels.csv")
+        gcmp = pd.concat([dfg[["llm_compliance_kappa", "jsd_pool", "jsd_random", "jsd_floor", "jsd_vote_0"]],
+                          dfg[corr_cols].add_prefix("gemini_"),
+                          df.loc[dfg.index, corr_cols].add_prefix("requested_")], axis=1).sort_values("gemini_correction_0")
+        gcmp.to_csv(out / "requested_vs_gemini_labels.csv")
+        stats["gemini_missing_rows"] = int(missing.sum())
+        if "knn_kappa" in df:
+            for s in args.noises:
+                sub = dfg[f"correction_{s:g}"].dropna()
+                rho, pv = spearmanr(df.loc[sub.index, "knn_kappa"], sub)
+                stats[f"spearman_knn_vs_gemini_correction_{s:g}"] = [float(rho), float(pv)]
+        pd.set_option("display.width", 250)
+        print(f"\n=== content attributes, Gemini labels ({int(missing.sum())} rows without annotation) ===")
+        print(gcmp.round(3).to_string())
+
     if args.probe_labels:
-        content = [a for a in BIORXIV_ATTRIBUTES if a not in LENGTH_ATTRS]
         target, pool_pred, diag = probe_relabel(X_priv, lab_priv, X_pool, lab_pool, content, seed=args.seed)
         dfp, _, _ = analyze(X_priv, X_pool, lab_priv, pool_pred, K=args.K, noises=args.noises,
                             seeds=args.seeds, seed=args.seed, lab_target=target)
