@@ -97,6 +97,39 @@ Run the same script on that pool:
 python run.py --csv path/to/PE_iter_0.csv --n 0
 ```
 
+### Rerun on the round-0 synthetic pool
+
+This is the setting the real method uses: pick the quota attributes on the round-0 pool, which only depends on AIM-privatized metadata and public in-context examples (post-processing, no extra privacy cost).
+
+`gen_round0.py` reuses MAPLE's own prompt and `RANDOM_API` and saves the pool **before** the vote.
+MAPLE's `PE_iter_0.csv` is after the 1-NN vote on private data and top-K selection, so it would touch private data and is already filtered by φ.
+Defaults follow MAPLE: Qwen2.5-7B-Instruct, 10 of 50 in-context examples per prompt, 2000 × 7 = 14,000 texts, AIM ε = 4.
+
+Labels in the pool are the **requested** (AIM) values. `run.py` recomputes `word_count` from the generated text; the requested length is kept as `word_count_requested`.
+
+```bash
+# MAPLE's environment (vLLM + private-evolution), separate from pe-metadata
+python3 -m venv /data/$USER/envs/maple
+source /data/$USER/envs/maple/bin/activate
+pip install -U pip
+pip install vllm==0.10.1.1            # PyPI wheel is built for CUDA 12.8 (needed for Blackwell)
+pip install "private-evolution[text] @ git+https://github.com/microsoft/DPSDA.git" datasets==4.0.0
+python -c "import torch; print(torch.__version__, torch.cuda.get_device_capability(0))"   # expect +cu128, (12, 0)
+
+# generate: one shard per GPU (Qwen2.5-7B weights, ~15 GB, go to $HF_HOME)
+cd ~/PE-metadata
+CUDA_VISIBLE_DEVICES=1 python gen_round0.py --maple_dir $PE_DATA/MAPLE --eps 4.0 --shard 0 --num_shards 2   # tmux window 1
+CUDA_VISIBLE_DEVICES=2 python gen_round0.py --maple_dir $PE_DATA/MAPLE --eps 4.0 --shard 1 --num_shards 2   # tmux window 2
+python gen_round0.py --maple_dir $PE_DATA/MAPLE --eps 4.0 --merge --num_shards 2   # -> $PE_DATA/round0/eps4.0/pool.csv
+
+# measure blindness on the pool (pe-metadata env)
+source /data/$USER/envs/pe-metadata/bin/activate
+CUDA_VISIBLE_DEVICES=1 python run.py --csv $PE_DATA/round0/eps4.0/pool.csv --n 0 --repeats 5 \
+  --attributes primary_research_area model_organism experimental_approach dominant_data_type \
+               research_focus_scale disease_mention sample_size research_goal word_count word_count_requested \
+  --batch_size 256 --out $PE_DATA/results/round0_eps4.0
+```
+
 ### Getting labels for a new CSV
 
 If a CSV has text but no labels, annotate it with MAPLE's own script, `MAPLE/biorxiv/utility_eval/extract_metadata.py` (Gemini 2.5 flash-lite, MAPLE schema). It writes the labels as `map_<attribute>` columns; drop the `map_` prefix before running `run.py`.
