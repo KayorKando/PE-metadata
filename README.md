@@ -105,6 +105,14 @@ This is the setting the real method uses: pick the quota attributes on the round
 MAPLE's `PE_iter_0.csv` is after the 1-NN vote on private data and top-K selection, so it would touch private data and is already filtered by φ.
 Defaults follow MAPLE: Qwen2.5-7B-Instruct, 10 of 50 in-context examples per prompt, 2000 × 7 = 14,000 texts, AIM ε = 4.
 
+**One command** (sets up the MAPLE env if missing, generates one shard per GPU in parallel, merges, then runs the blindness analysis; logs in `$PE_DATA/round0/eps4.0/logs/`):
+
+```bash
+tmux new -d -s round0 "bash ~/PE-metadata/run_round0.sh"     # options: EPS=2.0 GPUS=1,2 bash run_round0.sh
+```
+
+The steps it runs are listed below for reference.
+
 Labels in the pool are the **requested** (AIM) values. `run.py` recomputes `word_count` from the generated text; the requested length is kept as `word_count_requested`.
 
 ```bash
