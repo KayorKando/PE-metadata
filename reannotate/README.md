@@ -10,7 +10,10 @@ Can a small classifier replace an LLM annotator for the metadata labels we need 
    - `scibert`: `allenai/scibert_scivocab_uncased`, fine-tuned (3 epochs, lr 2e-5, best epoch on val)
    - `biomedbert`: `microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract`, same recipe
 
-   None uses sentence-t5 (the vote embedding).
+   - `phi_mlp`: MLP (Linear d→256, ReLU, dropout 0.2, Linear 256→k; early stopping on val κ) on the **vote embedding** φ (sentence-t5-base, max_seq_length 1024, same cache as Experiment 1). The cheapest annotator for the method (φ is computed for the vote anyway); also shows, against the fine-tuned models, whether an attribute's information is in φ at all.
+   - `biomed_mlp`: the same MLP on frozen, mean-pooled BiomedBERT embeddings. Tells whether fine-tuning is needed at all.
+
+   Evaluation is always against Qwen / Gemini labels, never against any classifier's own labels.
 4. **Report** (`report.py` → `REPORT.md`), per attribute × model:
    1. agreement with labels: Cohen's κ, macro-F1, accuracy
    2. marginal: JSD(predicted marginal, label marginal), the same after confusion-matrix correction (`p_true ≈ argmin‖Cᵀp − p_pred‖, p ≥ 0`, C from the val split), and a resampling floor

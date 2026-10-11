@@ -198,10 +198,97 @@ class FineTuned:
         return self.classes[self.predict_ids(ids)]
 
 
+class EmbeddingMLP:
+    """Small MLP on a frozen text embedding: standardise -> Linear(d,256) -> ReLU ->
+    Dropout -> Linear(256,k). AdamW, early stopping on val kappa."""
+
+    def __init__(self, seed, hidden=256, dropout=0.2, lr=1e-3, wd=1e-4, batch=256, max_epochs=100, patience=10):
+        import torch
+        self.torch, self.seed = torch, seed
+        self.hidden, self.dropout, self.lr, self.wd = hidden, dropout, lr, wd
+        self.batch, self.max_epochs, self.patience = batch, max_epochs, patience
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def _t(self, X):
+        return self.torch.tensor((X - self.mu) / self.sd, dtype=self.torch.float32, device=self.device)
+
+    def _pred(self, Xt):
+        self.net.eval()
+        with self.torch.no_grad():
+            return self.net(Xt).argmax(-1).cpu().numpy()
+
+    def fit(self, Xtr, ytr, Xva, yva, classes):
+        torch = self.torch
+        torch.manual_seed(self.seed)
+        self.mu, self.sd = Xtr.mean(0), Xtr.std(0) + 1e-6
+        cid = {c: i for i, c in enumerate(classes)}
+        y = torch.tensor([cid[v] for v in ytr], device=self.device)
+        Xt, Xv = self._t(Xtr), self._t(Xva)
+        nn = torch.nn
+        self.net = nn.Sequential(nn.Linear(Xtr.shape[1], self.hidden), nn.ReLU(), nn.Dropout(self.dropout),
+                                 nn.Linear(self.hidden, len(classes))).to(self.device)
+        opt = torch.optim.AdamW(self.net.parameters(), lr=self.lr, weight_decay=self.wd)
+        self.classes = np.array(classes)
+        g = torch.Generator(device="cpu").manual_seed(self.seed)
+        best, bad, log = None, 0, []
+        for ep in range(self.max_epochs):
+            self.net.train()
+            perm = torch.randperm(len(Xt), generator=g).to(self.device)
+            for i in range(0, len(perm), self.batch):
+                b = perm[i:i + self.batch]
+                loss = nn.functional.cross_entropy(self.net(Xt[b]), y[b])
+                opt.zero_grad(); loss.backward(); opt.step()
+            k = cohen_kappa_score(yva, self.classes[self._pred(Xv)])
+            log.append(float(k))
+            if best is None or k > best[0]:
+                best, bad = (k, ep, {n: p.detach().clone() for n, p in self.net.state_dict().items()}), 0
+            else:
+                bad += 1
+                if bad >= self.patience:
+                    break
+        self.net.load_state_dict(best[2])
+        return {"best_epoch": best[1], "epochs_run": len(log), "val_kappa": float(best[0])}
+
+    def predict(self, X):
+        return self.classes[self._pred(self._t(X))]
+
+
+def embed_phi(texts, cache_dir):
+    """sentence-t5-base, max_seq_length 1024: the vote embedding (same cache as run.py)."""
+    from blindness.embed import embed
+    return embed(list(texts), "sentence-t5-base", 1024, batch_size=256, cache_dir=cache_dir)
+
+
+def embed_frozen_bert(texts, name, cache_dir, max_len=512, batch=64):
+    """Frozen encoder, mean of the last hidden states over real tokens. Cached on disk."""
+    import hashlib
+    key = hashlib.sha1(("\n".join(texts) + name + str(max_len)).encode()).hexdigest()[:16]
+    path = Path(cache_dir) / f"frozen_{name.replace('/', '_')}_{key}.npy"
+    if path.exists():
+        return np.load(path)
+    import torch
+    from transformers import AutoModel, AutoTokenizer
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    tok, model = AutoTokenizer.from_pretrained(name), AutoModel.from_pretrained(name).to(dev).eval()
+    order = np.argsort([len(t) for t in texts])
+    out = np.zeros((len(texts), model.config.hidden_size), np.float32)
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=dev == "cuda"):
+        for i in range(0, len(order), batch):
+            idx = order[i:i + batch]
+            enc = tok([texts[j] for j in idx], truncation=True, max_length=max_len, padding=True,
+                      return_tensors="pt").to(dev)
+            h = model(**enc).last_hidden_state.float()
+            m = enc["attention_mask"].unsqueeze(-1).float()
+            out[idx] = ((h * m).sum(1) / m.sum(1)).cpu().numpy()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(path, out)
+    return out
+
+
 # ---------------- main ----------------
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--model", required=True, choices=["tfidf", "scibert", "biomedbert"])
+    p.add_argument("--model", required=True, choices=["tfidf", "scibert", "biomedbert", "phi_mlp", "biomed_mlp"])
     p.add_argument("--pool_qwen", required=True, help="annotate_qwen.py output on the round-0 pool")
     p.add_argument("--private_csv", required=True, help="private CSV with Gemini labels (evaluation only)")
     p.add_argument("--private_qwen", default=None, help="annotate_qwen.py output on a private sample")
@@ -213,6 +300,7 @@ def main():
     p.add_argument("--lr", type=float, default=2e-5)
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--max_len", type=int, default=512)
+    p.add_argument("--cache_dir", default=None, help="embedding cache (default $PE_DATA/cache)")
     args = p.parse_args()
 
     pool = pd.read_csv(args.pool_qwen)
@@ -236,7 +324,16 @@ def main():
         sets["private_qwen"] = pq["text"].astype(str).tolist()
 
     t0 = time.time()
-    if args.model == "tfidf":
+    import os
+    cache_dir = args.cache_dir or str(Path(os.environ.get("PE_DATA", ".")) / "cache")
+    array_feats = args.model in ("tfidf", "phi_mlp", "biomed_mlp")
+    if args.model in ("phi_mlp", "biomed_mlp"):
+        m = EmbeddingMLP(args.seed)
+        if args.model == "phi_mlp":
+            feats = {k: embed_phi(v, cache_dir) for k, v in sets.items()}
+        else:
+            feats = {k: embed_frozen_bert(v, HF_MODELS["biomedbert"], cache_dir, args.max_len) for k, v in sets.items()}
+    elif args.model == "tfidf":
         m = TfidfLR(args.seed)
         m.fit_vectorizer([sets["pool"][i] for i in tr])
         feats = {k: m.vec.transform(v) for k, v in sets.items()}
@@ -245,7 +342,7 @@ def main():
         dev = "cuda" if torch.cuda.is_available() else "cpu"
         m = FineTuned(HF_MODELS[args.model], args.seed, args.epochs, args.lr, args.batch_size, args.max_len, dev)
         feats = {k: m.encode(v) for k, v in sets.items()}
-    sub = lambda f, idx: f[idx] if args.model == "tfidf" else [f[i] for i in idx]  # noqa: E731
+    sub = lambda f, idx: f[idx] if array_feats else [f[i] for i in idx]  # noqa: E731
 
     rows, info, preds = [], {}, {}
     for a in args.attributes:
@@ -254,7 +351,7 @@ def main():
         itr, iva, ite = ok(tr), ok(va), ok(te)
         classes = sorted(set(y[itr]))
         ta = time.time()
-        if args.model == "tfidf":
+        if args.model == "tfidf":  # (MLP and fine-tuned models take classes)
             info[a] = m.fit(sub(feats["pool"], itr), y[itr].astype(str), sub(feats["pool"], iva), y[iva].astype(str))
         else:
             info[a] = m.fit(sub(feats["pool"], itr), y[itr], sub(feats["pool"], iva), y[iva].astype(str), classes)
