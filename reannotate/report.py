@@ -4,7 +4,11 @@ Tables:
   A. Annotator: Qwen vs Gemini on the same private texts (kappa, marginal JSD),
      and LLM compliance on the pool (requested AIM label vs Qwen label).
   B. Per attribute x model, for each evaluation set: kappa, macro-F1,
-     marginal JSD raw / corrected / floor.
+     marginal JSD raw / corrected / floor. Two families, reported separately:
+       text encoders  (TF-IDF, SciBERT, BiomedBERT, MLPs on frozen BiomedBERT)
+       vote embedding (MLPs on phi = sentence-t5)
+     plus the kappa gap "best text model - best phi model" per attribute
+     (small gap: the information is in phi, the L2 vote just does not use it).
   C. Cost: training and prediction time per model.
 """
 import argparse
@@ -31,6 +35,10 @@ def md(df, digits=3):
     lines = ["| " + " | ".join([d.index.name or ""] + cols) + " |", "|" + "---|" * (len(cols) + 1)]
     lines += ["| " + " | ".join([str(i)] + [str(v) for v in r]) + " |" for i, r in zip(d.index, d.values)]
     return "\n".join(lines)
+
+
+FAMILIES = {"text encoders": ["tfidf", "scibert", "biomedbert", "biomed_mlp", "biomed_mh"],
+            "vote embedding (phi)": ["phi_mlp", "phi_mh"]}
 
 
 def main():
@@ -88,20 +96,37 @@ def main():
         for ev in M["eval_set"].unique():
             sub = M[M.eval_set == ev]
             parts.append(f"## B. Classifiers on `{ev}`\n")
-            for metric in ["kappa", "macro_f1", "marginal_jsd", "marginal_jsd_corrected"]:
-                T = sub.pivot(index="attribute", columns="model", values=metric)
-                if metric.startswith("marginal"):
-                    T["floor"] = sub.groupby("attribute")["marginal_jsd_floor"].first()
-                T.loc["mean"] = T.mean()
-                parts += [f"**{metric}**\n", md(T), ""]
+            for fam, models in FAMILIES.items():
+                fs = sub[sub.model.isin(models)]
+                if fs.empty:
+                    continue
+                parts.append(f"### {fam}\n")
+                for metric in ["kappa", "macro_f1", "marginal_jsd", "marginal_jsd_corrected"]:
+                    T = fs.pivot(index="attribute", columns="model", values=metric)
+                    T = T[[c for c in models if c in T.columns]]
+                    if metric.startswith("marginal"):
+                        T["floor"] = fs.groupby("attribute")["marginal_jsd_floor"].first()
+                    T.loc["mean"] = T.mean()
+                    parts += [f"**{metric}**\n", md(T), ""]
+            K = sub.pivot(index="attribute", columns="model", values="kappa")
+            txt = [c for c in FAMILIES["text encoders"] if c in K]
+            phi = [c for c in FAMILIES["vote embedding (phi)"] if c in K]
+            if txt and phi:
+                G = pd.DataFrame({"best_text_kappa": K[txt].max(1), "best_text_model": K[txt].idxmax(1),
+                                  "best_phi_kappa": K[phi].max(1), "best_phi_model": K[phi].idxmax(1)})
+                G["gap(text - phi)"] = G.best_text_kappa - G.best_phi_kappa
+                parts += ["### text encoders vs phi\n",
+                          "Small gap: the attribute is in phi, the L2 vote just does not use it. "
+                          "Large gap: phi itself lacks it.\n", md(G.sort_values("gap(text - phi)")), ""]
 
         # C. cost
         rows = []
         for f in sorted(res.glob("*/info.json")):
             i = json.loads(f.read_text())
             per = i["per_attribute"].values()
+            joint = (i.get("joint_fit") or {}).get("train_seconds", 0.0)
             rows.append({"model": i["model"], "total_seconds": i["total_seconds"],
-                         "train_seconds_sum": sum(x["train_seconds"] for x in per),
+                         "train_seconds_sum": sum(x["train_seconds"] for x in per) + joint,
                          "predict_seconds_sum": sum(x["predict_seconds"] for x in per)})
         parts += ["## C. Cost\n", md(pd.DataFrame(rows).set_index("model"), 1), ""]
 

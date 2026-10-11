@@ -2,7 +2,7 @@
 # Re-annotating experiment, one command:
 #   1. round-0 pool (Qwen + AIM metadata)       -> reuses $PE_DATA/round0/eps$EPS/pool.csv, else runs run_round0.sh
 #   2. Qwen as annotator (vLLM, MAPLE prompt)   -> pool on GPU A, a private sample on GPU B, in parallel
-#   3. one classifier per attribute: TF-IDF+LR (CPU); SciBERT, phi-MLP (GPU A); BiomedBERT, frozen-BiomedBERT MLP (GPU B); in parallel
+#   3. one classifier per attribute: TF-IDF+LR (CPU); SciBERT, phi MLPs (GPU A); BiomedBERT, frozen-BiomedBERT MLPs (GPU B); in parallel
 #   4. report                                    -> $OUT/results/REPORT.md
 #
 #   tmux new -d -s reann "bash ~/PE-metadata/reannotate/run_reannotate.sh"
@@ -70,8 +70,10 @@ run_clf() {  # model gpu
 run_clf tfidf ""
 run_clf scibert "$GA"
 run_clf biomedbert "$GB"
-run_clf phi_mlp "$GA"      # MLP on the vote embedding (sentence-t5, cached)
-run_clf biomed_mlp "$GB"   # MLP on frozen BiomedBERT (mean-pooled)
+run_clf phi_mlp "$GA"      # vote embedding phi (sentence-t5, cached): one MLP per attribute
+run_clf phi_mh "$GA"       # phi: shared 2-layer trunk + one linear head per attribute
+run_clf biomed_mlp "$GB"   # frozen BiomedBERT (mean-pooled): one MLP per attribute
+run_clf biomed_mh "$GB"    # frozen BiomedBERT: shared trunk + heads
 fail=0
 for p in "${pids[@]:-}"; do [ -z "$p" ] || wait "$p" || fail=1; done
 [ $fail -eq 0 ] || stamp "a classifier failed, see $LOG/3_*.log (the report uses the ones that finished)"

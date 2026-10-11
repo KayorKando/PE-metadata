@@ -198,9 +198,15 @@ class FineTuned:
         return self.classes[self.predict_ids(ids)]
 
 
+def mlp_trunk(nn, d, hidden, dropout):
+    """Two hidden layers: Linear(d,h) -> ReLU -> Dropout -> Linear(h,h) -> ReLU -> Dropout."""
+    return nn.Sequential(nn.Linear(d, hidden), nn.ReLU(), nn.Dropout(dropout),
+                         nn.Linear(hidden, hidden), nn.ReLU(), nn.Dropout(dropout))
+
+
 class EmbeddingMLP:
-    """Small MLP on a frozen text embedding: standardise -> Linear(d,256) -> ReLU ->
-    Dropout -> Linear(256,k). AdamW, early stopping on val kappa."""
+    """One MLP per attribute on a frozen text embedding: standardise -> two hidden layers
+    (256, ReLU, dropout 0.2) -> Linear(256,k). AdamW, early stopping on val kappa."""
 
     def __init__(self, seed, hidden=256, dropout=0.2, lr=1e-3, wd=1e-4, batch=256, max_epochs=100, patience=10):
         import torch
@@ -225,7 +231,7 @@ class EmbeddingMLP:
         y = torch.tensor([cid[v] for v in ytr], device=self.device)
         Xt, Xv = self._t(Xtr), self._t(Xva)
         nn = torch.nn
-        self.net = nn.Sequential(nn.Linear(Xtr.shape[1], self.hidden), nn.ReLU(), nn.Dropout(self.dropout),
+        self.net = nn.Sequential(mlp_trunk(nn, Xtr.shape[1], self.hidden, self.dropout),
                                  nn.Linear(self.hidden, len(classes))).to(self.device)
         opt = torch.optim.AdamW(self.net.parameters(), lr=self.lr, weight_decay=self.wd)
         self.classes = np.array(classes)
@@ -251,6 +257,90 @@ class EmbeddingMLP:
 
     def predict(self, X):
         return self.classes[self._pred(self._t(X))]
+
+
+class MultiHeadMLP:
+    """Shared trunk (same two hidden layers) + one linear head per attribute giving that
+    attribute's logits. Trained jointly: sum of per-attribute cross-entropies, rows with a
+    missing label ignored for that head. Early stopping on the mean val kappa."""
+
+    def __init__(self, seed, hidden=256, dropout=0.2, lr=1e-3, wd=1e-4, batch=256, max_epochs=100, patience=10):
+        import torch
+        self.torch, self.seed = torch, seed
+        self.hidden, self.dropout, self.lr, self.wd = hidden, dropout, lr, wd
+        self.batch, self.max_epochs, self.patience = batch, max_epochs, patience
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def _t(self, X):
+        return self.torch.tensor((X - self.mu) / self.sd, dtype=self.torch.float32, device=self.device)
+
+    def _logits(self, Xt):
+        self.trunk.eval(); self.heads.eval()
+        with self.torch.no_grad():
+            h = self.trunk(Xt)
+            return {a: self.heads[a](h).argmax(-1).cpu().numpy() for a in self.attrs}
+
+    def fit(self, Xtr, Ytr, Xva, Yva, classes):
+        """Ytr / Yva: {attr: label array, None = missing}; classes: {attr: sorted classes}."""
+        torch, nn = self.torch, self.torch.nn
+        torch.manual_seed(self.seed)
+        self.attrs, self.classes = list(classes), {a: np.array(c) for a, c in classes.items()}
+        self.mu, self.sd = Xtr.mean(0), Xtr.std(0) + 1e-6
+        ys = {}
+        for a in self.attrs:
+            cid = {c: i for i, c in enumerate(classes[a])}
+            ys[a] = torch.tensor([cid.get(v, -100) if v is not None else -100 for v in Ytr[a]], device=self.device)
+        Xt, Xv = self._t(Xtr), self._t(Xva)
+        self.trunk = mlp_trunk(nn, Xtr.shape[1], self.hidden, self.dropout).to(self.device)
+        self.heads = nn.ModuleDict({a: nn.Linear(self.hidden, len(classes[a])) for a in self.attrs}).to(self.device)
+        params = list(self.trunk.parameters()) + list(self.heads.parameters())
+        opt = torch.optim.AdamW(params, lr=self.lr, weight_decay=self.wd)
+        g = torch.Generator(device="cpu").manual_seed(self.seed)
+
+        def val_kappas():
+            pr = self._logits(Xv)
+            out = {}
+            for a in self.attrs:
+                ok = np.array([v is not None for v in Yva[a]])
+                out[a] = float(cohen_kappa_score(np.asarray(Yva[a])[ok].astype(str), self.classes[a][pr[a][ok]]))
+            return out
+
+        best, bad, log = None, 0, []
+        for ep in range(self.max_epochs):
+            self.trunk.train(); self.heads.train()
+            perm = torch.randperm(len(Xt), generator=g).to(self.device)
+            for i in range(0, len(perm), self.batch):
+                b = perm[i:i + self.batch]
+                h = self.trunk(Xt[b])
+                loss = sum(nn.functional.cross_entropy(self.heads[a](h), ys[a][b], ignore_index=-100)
+                           for a in self.attrs if (ys[a][b] >= 0).any())
+                opt.zero_grad(); loss.backward(); opt.step()
+            vk = val_kappas()
+            mk = float(np.mean(list(vk.values())))
+            log.append(mk)
+            if best is None or mk > best[0]:
+                state = ({n: p.detach().clone() for n, p in self.trunk.state_dict().items()},
+                         {n: p.detach().clone() for n, p in self.heads.state_dict().items()})
+                best, bad = (mk, ep, state, vk), 0
+            else:
+                bad += 1
+                if bad >= self.patience:
+                    break
+        self.trunk.load_state_dict(best[2][0]); self.heads.load_state_dict(best[2][1])
+        return {"best_epoch": best[1], "epochs_run": len(log), "val_mean_kappa": best[0], "val_kappa": best[3]}
+
+    def predict(self, X, a):
+        return self.classes[a][self._logits(self._t(X))[a]]
+
+
+class _Head:
+    """Per-attribute view of a fitted MultiHeadMLP, so the evaluation loop is shared."""
+
+    def __init__(self, mh, a):
+        self.mh, self.a = mh, a
+
+    def predict(self, X):
+        return self.mh.predict(X, self.a)
 
 
 def embed_phi(texts, cache_dir):
@@ -288,7 +378,7 @@ def embed_frozen_bert(texts, name, cache_dir, max_len=512, batch=64):
 # ---------------- main ----------------
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--model", required=True, choices=["tfidf", "scibert", "biomedbert", "phi_mlp", "biomed_mlp"])
+    p.add_argument("--model", required=True, choices=["tfidf", "scibert", "biomedbert", "phi_mlp", "biomed_mlp", "phi_mh", "biomed_mh"])
     p.add_argument("--pool_qwen", required=True, help="annotate_qwen.py output on the round-0 pool")
     p.add_argument("--private_csv", required=True, help="private CSV with Gemini labels (evaluation only)")
     p.add_argument("--private_qwen", default=None, help="annotate_qwen.py output on a private sample")
@@ -326,10 +416,11 @@ def main():
     t0 = time.time()
     import os
     cache_dir = args.cache_dir or str(Path(os.environ.get("PE_DATA", ".")) / "cache")
-    array_feats = args.model in ("tfidf", "phi_mlp", "biomed_mlp")
-    if args.model in ("phi_mlp", "biomed_mlp"):
-        m = EmbeddingMLP(args.seed)
-        if args.model == "phi_mlp":
+    array_feats = args.model in ("tfidf", "phi_mlp", "biomed_mlp", "phi_mh", "biomed_mh")
+    multihead = args.model.endswith("_mh")
+    if args.model in ("phi_mlp", "biomed_mlp", "phi_mh", "biomed_mh"):
+        m = MultiHeadMLP(args.seed) if multihead else EmbeddingMLP(args.seed)
+        if args.model.startswith("phi"):
             feats = {k: embed_phi(v, cache_dir) for k, v in sets.items()}
         else:
             feats = {k: embed_frozen_bert(v, HF_MODELS["biomedbert"], cache_dir, args.max_len) for k, v in sets.items()}
@@ -345,17 +436,32 @@ def main():
     sub = lambda f, idx: f[idx] if array_feats else [f[i] for i in idx]  # noqa: E731
 
     rows, info, preds = [], {}, {}
+    shared = None
+    if multihead:  # one joint fit for all attributes
+        ta = time.time()
+        nonnull = lambda y, idx: [y[i] for i in idx]  # noqa: E731
+        classes_all = {a: sorted(set(v for v in lab_pool[a][tr] if v is not None)) for a in args.attributes}
+        shared = m.fit(feats["pool"][tr], {a: nonnull(lab_pool[a], tr) for a in args.attributes},
+                       feats["pool"][va], {a: nonnull(lab_pool[a], va) for a in args.attributes}, classes_all)
+        shared["train_seconds"] = round(time.time() - ta, 1)
+        print(f"[{args.model}] joint fit: {shared['epochs_run']} epochs, val mean kappa {shared['val_mean_kappa']:.3f}",
+              flush=True)
+        mh = m
     for a in args.attributes:
         y = lab_pool[a]
         ok = lambda idx: idx[np.array([y[i] is not None for i in idx], bool)]  # noqa: E731
         itr, iva, ite = ok(tr), ok(va), ok(te)
         classes = sorted(set(y[itr]))
         ta = time.time()
-        if args.model == "tfidf":  # (MLP and fine-tuned models take classes)
+        if multihead:
+            m = _Head(mh, a)
+            classes = list(mh.classes[a])
+            info[a] = {"joint_fit": True, "val_kappa": shared["val_kappa"][a]}
+        elif args.model == "tfidf":  # (MLP and fine-tuned models take classes)
             info[a] = m.fit(sub(feats["pool"], itr), y[itr].astype(str), sub(feats["pool"], iva), y[iva].astype(str))
         else:
             info[a] = m.fit(sub(feats["pool"], itr), y[itr], sub(feats["pool"], iva), y[iva].astype(str), classes)
-        info[a]["train_seconds"] = round(time.time() - ta, 1)
+        info[a]["train_seconds"] = round(time.time() - ta, 1) if not multihead else 0.0
         C = confusion(y[iva], m.predict(sub(feats["pool"], iva)), classes)
 
         ti = time.time()
@@ -379,7 +485,8 @@ def main():
     res.to_csv(out / "metrics.csv", index=False)
     pd.DataFrame({f"pred_{a}": v for a, v in preds.items()}).to_csv(out / "pool_predictions.csv", index=False)
     (out / "info.json").write_text(json.dumps({**vars(args), "n_train": len(tr), "n_val": len(va), "n_test": len(te),
-                                               "total_seconds": round(time.time() - t0, 1), "per_attribute": info},
+                                               "total_seconds": round(time.time() - t0, 1), "per_attribute": info,
+                                               "joint_fit": shared},
                                               indent=2))
     pd.set_option("display.width", 220)
     print(res.round(3).to_string(index=False))

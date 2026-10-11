@@ -10,8 +10,15 @@ Can a small classifier replace an LLM annotator for the metadata labels we need 
    - `scibert`: `allenai/scibert_scivocab_uncased`, fine-tuned (3 epochs, lr 2e-5, best epoch on val)
    - `biomedbert`: `microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract`, same recipe
 
-   - `phi_mlp`: MLP (Linear d→256, ReLU, dropout 0.2, Linear 256→k; early stopping on val κ) on the **vote embedding** φ (sentence-t5-base, max_seq_length 1024, same cache as Experiment 1). The cheapest annotator for the method (φ is computed for the vote anyway); also shows, against the fine-tuned models, whether an attribute's information is in φ at all.
-   - `biomed_mlp`: the same MLP on frozen, mean-pooled BiomedBERT embeddings. Tells whether fine-tuning is needed at all.
+   - MLPs on frozen embeddings, two hidden layers (Linear d→256, ReLU, dropout 0.2, Linear 256→256, ReLU, dropout 0.2), AdamW lr 1e-3, wd 1e-4, batch 256, early stopping on val κ (patience 10, ≤ 100 epochs), in two shapes:
+     - `*_mlp`: one MLP per attribute
+     - `*_mh`: one shared trunk + one linear head per attribute giving that attribute's logits, trained jointly (sum of cross-entropies, missing labels ignored), early stopping on the mean val κ
+
+     on two embeddings, **reported as separate families**:
+     - `phi_*`: the vote embedding φ (sentence-t5-base, max_seq_length 1024, Experiment 1 cache). Cheapest annotator for the method (φ is computed for the vote anyway).
+     - `biomed_*`: frozen, mean-pooled BiomedBERT. Tells whether fine-tuning is needed.
+
+   The report also gives, per attribute, the κ gap "best text-encoder model − best φ model": small gap = the attribute is in φ and the L2 vote just does not use it; large gap = φ itself lacks it.
 
    Evaluation is always against Qwen / Gemini labels, never against any classifier's own labels.
 4. **Report** (`report.py` → `REPORT.md`), per attribute × model:
