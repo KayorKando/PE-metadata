@@ -1,4 +1,4 @@
-# Experiment 2: lambda sweep for the blind-attribute quota
+# Quota sweep: lambda sweep for the blind-attribute quota (Experiment 2)
 
 MAPLE PE (bioRxiv, ε = 4 by default: T = 4 rounds, noise σ = 2.58, K = 2000, L = 6) with one change in the
 selection step (`quota.py`): cells on the blind attributes B (default `word_count`, `sample_size`,
@@ -33,9 +33,9 @@ Round 0 reuses the pre-vote pool from `gen_round0.py`, so all λ runs start from
 ## Run (weekend)
 
 ```bash
-tmux new -d -s sweep "export PE_DATA=$PE_DATA HF_HOME=$HF_HOME; bash ~/PE-metadata/experiment2/run_lambda_sweep.sh"
-tail -f $PE_DATA/exp2/eps4.0/logs/*.log
-cat $PE_DATA/exp2/eps4.0/SWEEP.md          # updated after every finished run; frontier.png, curves.png
+tmux new -d -s sweep "export PE_DATA=$PE_DATA HF_HOME=$HF_HOME; bash ~/PE-metadata/quota_sweep/run_lambda_sweep.sh"
+tail -f $PE_DATA/quota_sweep/eps4.0/logs/*.log
+cat $PE_DATA/quota_sweep/eps4.0/SWEEP.md          # updated after every finished run; frontier.png, curves.png
 ```
 
 Options: `LAMS="0 0.25 0.5 0.75 1"`, `ANNOTATORS="qwen inherited"`, `SEEDS="0 1"`, `SCHEDULE=constant`, `EPS=1.0`

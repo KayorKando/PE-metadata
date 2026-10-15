@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Experiment 2: sweep lambda for the blind-attribute quota (MAUVE vs metadata JSD).
+# Quota sweep (Experiment 2): sweep lambda for the blind-attribute quota (MAUVE vs metadata JSD).
 #
-#   tmux new -d -s sweep "export PE_DATA=$PE_DATA HF_HOME=$HF_HOME; bash ~/PE-metadata/experiment2/run_lambda_sweep.sh"
-#   tail -f $PE_DATA/exp2/eps4.0/logs/*.log
-#   cat $PE_DATA/exp2/eps4.0/SWEEP.md
+#   tmux new -d -s sweep "export PE_DATA=$PE_DATA HF_HOME=$HF_HOME; bash ~/PE-metadata/quota_sweep/run_lambda_sweep.sh"
+#   tail -f $PE_DATA/quota_sweep/eps4.0/logs/*.log
+#   cat $PE_DATA/quota_sweep/eps4.0/SWEEP.md
 #
 # Settings (environment variables):
 #   LAMS        lambda values             (default "0 0.25 0.5 0.75 1"; 0 = MAPLE)
@@ -28,9 +28,9 @@ MAPLE_ENV=${MAPLE_ENV:-/data/$USER/envs/maple}
 PE_ENV=${PE_ENV:-/data/$USER/envs/pe-metadata}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 POOL=$PE_DATA/round0/eps$EPS/pool.csv
-ROOT=$PE_DATA/exp2/eps$EPS
+ROOT=$PE_DATA/quota_sweep/eps$EPS
 LOG=$ROOT/logs
-TEST_REF=$PE_DATA/exp2/test_ref_qwen.csv
+TEST_REF=$PE_DATA/quota_sweep/test_ref_qwen.csv
 mkdir -p "$LOG"
 IFS=, read -ra G <<< "$GPUS"
 MPY=$MAPLE_ENV/bin/python
@@ -46,7 +46,7 @@ stamp "repo $(git rev-parse --short HEAD 2>/dev/null || echo '?'), outputs -> $R
 # --- 1. test-set reference labels (once, shared by every run) ---
 if [ ! -s "$TEST_REF" ]; then
   stamp "1. Qwen labels for the test set -> $TEST_REF"
-  CUDA_VISIBLE_DEVICES=${G[0]} "$MPY" experiment2/quota_pe.py --maple_dir "$PE_DATA/MAPLE" --pool_csv "$POOL" \
+  CUDA_VISIBLE_DEVICES=${G[0]} "$MPY" quota_sweep/quota_pe.py --maple_dir "$PE_DATA/MAPLE" --pool_csv "$POOL" \
     --eps "$EPS" --lam 0 --test_ref "$TEST_REF" --out "$ROOT/_prep" --prep_only > "$LOG/1_test_ref.log" 2>&1
 fi
 
@@ -63,11 +63,11 @@ worker() {  # gpu index
       out="$ROOT/$ann/$name"
       if [ -f "$out/DONE" ]; then stamp "skip $ann/$name (done)"; else
         stamp "run $ann/$name on GPU ${G[$gi]}"
-        CUDA_VISIBLE_DEVICES=${G[$gi]} "$MPY" experiment2/quota_pe.py --maple_dir "$PE_DATA/MAPLE" --pool_csv "$POOL" \
+        CUDA_VISIBLE_DEVICES=${G[$gi]} "$MPY" quota_sweep/quota_pe.py --maple_dir "$PE_DATA/MAPLE" --pool_csv "$POOL" \
           --eps "$EPS" --lam "$lam" --schedule "$SCHEDULE" --loop_annotator "$ann" --seed "$seed" \
           --test_ref "$TEST_REF" --out "$out" $EXTRA > "$LOG/${ann}_${name}.log" 2>&1 \
           && stamp "done $ann/$name" || stamp "FAILED $ann/$name, see $LOG/${ann}_${name}.log"
-        "$PE_ENV/bin/python" experiment2/summarize.py --root "$ROOT" > /dev/null 2>&1 || true   # keep SWEEP.md current
+        "$PE_ENV/bin/python" quota_sweep/summarize.py --root "$ROOT" > /dev/null 2>&1 || true   # keep SWEEP.md current
       fi
     fi
     j=$((j + 1))
@@ -78,5 +78,5 @@ for gi in "${!G[@]}"; do worker "$gi" & pids+=($!); done
 for p in "${pids[@]}"; do wait "$p"; done
 
 # --- 3. summary ---
-"$PE_ENV/bin/python" experiment2/summarize.py --root "$ROOT" > "$LOG/3_summary.log" 2>&1 || true
+"$PE_ENV/bin/python" quota_sweep/summarize.py --root "$ROOT" > "$LOG/3_summary.log" 2>&1 || true
 stamp "done. cat $ROOT/SWEEP.md  (figures: frontier.png, curves.png)"

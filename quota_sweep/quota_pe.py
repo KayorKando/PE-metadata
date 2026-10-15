@@ -1,9 +1,9 @@
-"""Experiment 2: MAPLE PE with the blind-attribute quota, for one lambda.
+"""Quota sweep (Experiment 2): MAPLE PE with the blind-attribute quota, for one lambda.
 
 Round 0 reuses the pre-vote pool from gen_round0.py (same for every lambda, so runs
 differ only in selection). Then for t = 0..T:
   vote (MAPLE: every private point votes for its nearest candidate under phi, + N(0, sigma^2))
-  -> quota selection on the blind attributes B (experiment2/quota.py), lambda_t from the schedule
+  -> quota selection on the blind attributes B (quota_sweep/quota.py), lambda_t from the schedule
   -> evaluate the K survivors (JSD per attribute vs the test set, MAUVE vs the test set)
   -> VARIATION_API x L on the survivors (MAPLE's prompt) -> next candidates.
 Labels used *inside* the loop come from --loop_annotator; evaluation always uses
@@ -13,9 +13,9 @@ One GPU per run: vLLM (generation + Qwen annotation share one engine) and senten
 Resumable: finished rounds are reloaded and the run continues after the last one.
 
 Example:
-    CUDA_VISIBLE_DEVICES=1 python experiment2/quota_pe.py --maple_dir $PE_DATA/MAPLE \
+    CUDA_VISIBLE_DEVICES=1 python quota_sweep/quota_pe.py --maple_dir $PE_DATA/MAPLE \
         --pool_csv $PE_DATA/round0/eps4.0/pool.csv --eps 4.0 --lam 0.5 \
-        --test_ref $PE_DATA/exp2/test_ref_qwen.csv --out $PE_DATA/exp2/eps4.0/qwen/lam0.5
+        --test_ref $PE_DATA/quota_sweep/test_ref_qwen.csv --out $PE_DATA/quota_sweep/eps4.0/qwen/lam0.5
 """
 import argparse
 import importlib.util
@@ -32,8 +32,8 @@ from scipy.spatial.distance import jensenshannon
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from blindness.schema import BIORXIV_SCHEMA, clean_labels  # noqa: E402
-from experiment2.annotators import ATTRS, CONTENT, make_annotator  # noqa: E402
-from experiment2.quota import assign_cells, build_cell_space, cell_keys, select  # noqa: E402
+from quota_sweep.annotators import ATTRS, CONTENT, make_annotator  # noqa: E402
+from quota_sweep.quota import assign_cells, build_cell_space, cell_keys, select  # noqa: E402
 from vote_correction import jsd, nearest_pool_index  # noqa: E402
 
 METADATA = CONTENT + ["word_count"]   # MAPLE's 9 metadata columns (word_count = requested length)

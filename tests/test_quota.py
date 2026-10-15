@@ -2,7 +2,7 @@
 within a cell the vote order is kept; water-filling keeps |selected| = K."""
 import numpy as np
 
-from experiment2.quota import OTHER, assign_cells, build_cell_space, quotas, select
+from quota_sweep.quota import OTHER, assign_cells, build_cell_space, quotas, select
 
 
 def test_quota():
