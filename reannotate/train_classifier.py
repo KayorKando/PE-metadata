@@ -352,10 +352,12 @@ def embed_phi(texts, cache_dir):
 def embed_frozen_bert(texts, name, cache_dir, max_len=512, batch=64):
     """Frozen encoder, mean of the last hidden states over real tokens. Cached on disk."""
     import hashlib
-    key = hashlib.sha1(("\n".join(texts) + name + str(max_len)).encode()).hexdigest()[:16]
-    path = Path(cache_dir) / f"frozen_{name.replace('/', '_')}_{key}.npy"
-    if path.exists():
-        return np.load(path)
+    path = None
+    if cache_dir:
+        key = hashlib.sha1(("\n".join(texts) + name + str(max_len)).encode()).hexdigest()[:16]
+        path = Path(cache_dir) / f"frozen_{name.replace('/', '_')}_{key}.npy"
+        if path.exists():
+            return np.load(path)
     import torch
     from transformers import AutoModel, AutoTokenizer
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -370,9 +372,90 @@ def embed_frozen_bert(texts, name, cache_dir, max_len=512, batch=64):
             h = model(**enc).last_hidden_state.float()
             m = enc["attention_mask"].unsqueeze(-1).float()
             out[idx] = ((h * m).sum(1) / m.sum(1)).cpu().numpy()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.save(path, out)
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(path, out)
     return out
+
+
+# ---------------- save / load (for using a trained classifier as the PE annotator) ----------------
+def _mlp_from(d, hidden, dropout, k):
+    import torch.nn as nn
+    return nn.Sequential(mlp_trunk(nn, d, hidden, dropout), nn.Linear(hidden, k))
+
+
+def save_attr_model(model_name, m, a, mdir):
+    """Write what load_predictor needs for attribute a (multi-head models are saved once, see main)."""
+    import joblib
+    mdir.mkdir(parents=True, exist_ok=True)
+    if model_name == "tfidf":
+        joblib.dump(m.clf, mdir / f"{a}.joblib")
+    elif model_name in HF_MODELS:
+        d = mdir / a
+        m.model.save_pretrained(d)
+        (d / "classes.json").write_text(json.dumps(list(m.classes)))
+    elif model_name.endswith("_mlp"):
+        import torch
+        torch.save({"state": m.net.state_dict(), "mu": m.mu, "sd": m.sd, "classes": list(m.classes),
+                    "d": int(len(m.mu)), "hidden": m.hidden, "dropout": m.dropout}, mdir / f"{a}.pt")
+
+
+def load_predictor(results_dir, model_name, a, device=None):
+    """texts -> np.array of labels for attribute a, from results_dir/<model>/models/."""
+    import torch
+    mdir = Path(results_dir) / model_name / "models"
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    if model_name == "tfidf":
+        import joblib
+        vec, clf = joblib.load(mdir / "vectorizer.joblib"), joblib.load(mdir / f"{a}.joblib")
+        return lambda texts: clf.predict(vec.transform(list(texts)))
+    if model_name in HF_MODELS:
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        tok = AutoTokenizer.from_pretrained(mdir / "tokenizer")
+        net = AutoModelForSequenceClassification.from_pretrained(mdir / a).to(device).eval()
+        classes = np.array(json.loads((mdir / a / "classes.json").read_text()))
+
+        def pred(texts, batch=64, max_len=512):
+            texts = list(texts)
+            order = np.argsort([len(t) for t in texts])
+            out = np.empty(len(texts), int)
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
+                for i in range(0, len(order), batch):
+                    idx = order[i:i + batch]
+                    enc = tok([texts[j] for j in idx], truncation=True, max_length=max_len, padding=True,
+                              return_tensors="pt").to(device)
+                    out[idx] = net(**enc).logits.argmax(-1).cpu().numpy()
+            return classes[out]
+        return pred
+    # MLPs on a frozen embedding
+    if model_name.startswith("phi"):
+        from sentence_transformers import SentenceTransformer
+        st = SentenceTransformer("sentence-t5-base", device=device)
+        st.max_seq_length = 1024
+        featurize = lambda texts: st.encode(list(texts), batch_size=256, convert_to_numpy=True)  # noqa: E731
+    else:
+        featurize = lambda texts: embed_frozen_bert(list(texts), HF_MODELS["biomedbert"], None)  # noqa: E731
+    if model_name.endswith("_mh"):
+        ck = torch.load(mdir / "multihead.pt", map_location=device, weights_only=False)
+        import torch.nn as nn
+        trunk = mlp_trunk(nn, ck["d"], ck["hidden"], ck["dropout"]).to(device)
+        trunk.load_state_dict(ck["trunk"])
+        head = nn.Linear(ck["hidden"], len(ck["classes"][a])).to(device)
+        head.load_state_dict({k.split(".", 1)[1]: v for k, v in ck["heads"].items() if k.startswith(a + ".")})
+        net, classes = nn.Sequential(trunk, head).eval(), np.array(ck["classes"][a])
+    else:
+        ck = torch.load(mdir / f"{a}.pt", map_location=device, weights_only=False)
+        net = _mlp_from(ck["d"], ck["hidden"], ck["dropout"], len(ck["classes"])).to(device)
+        net.load_state_dict(ck["state"])
+        net.eval()
+        classes = np.array(ck["classes"])
+    mu, sd = ck["mu"], ck["sd"]
+
+    def pred(texts):
+        X = torch.tensor((featurize(texts) - mu) / sd, dtype=torch.float32, device=device)
+        with torch.no_grad():
+            return classes[net(X).argmax(-1).cpu().numpy()]
+    return pred
 
 
 # ---------------- main ----------------
@@ -391,6 +474,7 @@ def main():
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--max_len", type=int, default=512)
     p.add_argument("--cache_dir", default=None, help="embedding cache (default $PE_DATA/cache)")
+    p.add_argument("--save_models", action="store_true", help="save trained models (to use one as the PE annotator)")
     args = p.parse_args()
 
     pool = pd.read_csv(args.pool_qwen)
@@ -435,6 +519,15 @@ def main():
         feats = {k: m.encode(v) for k, v in sets.items()}
     sub = lambda f, idx: f[idx] if array_feats else [f[i] for i in idx]  # noqa: E731
 
+    out = Path(args.out) / args.model
+    mdir = out / "models"
+    if args.save_models:
+        mdir.mkdir(parents=True, exist_ok=True)
+        if args.model == "tfidf":
+            import joblib
+            joblib.dump(m.vec, mdir / "vectorizer.joblib")
+        elif args.model in HF_MODELS:
+            m.tok.save_pretrained(mdir / "tokenizer")
     rows, info, preds = [], {}, {}
     shared = None
     if multihead:  # one joint fit for all attributes
@@ -447,6 +540,11 @@ def main():
         print(f"[{args.model}] joint fit: {shared['epochs_run']} epochs, val mean kappa {shared['val_mean_kappa']:.3f}",
               flush=True)
         mh = m
+        if args.save_models:
+            import torch
+            torch.save({"trunk": mh.trunk.state_dict(), "heads": mh.heads.state_dict(), "mu": mh.mu, "sd": mh.sd,
+                        "classes": {a: list(c) for a, c in mh.classes.items()}, "d": int(len(mh.mu)),
+                        "hidden": mh.hidden, "dropout": mh.dropout}, mdir / "multihead.pt")
     for a in args.attributes:
         y = lab_pool[a]
         ok = lambda idx: idx[np.array([y[i] is not None for i in idx], bool)]  # noqa: E731
@@ -463,6 +561,8 @@ def main():
             info[a] = m.fit(sub(feats["pool"], itr), y[itr], sub(feats["pool"], iva), y[iva].astype(str), classes)
         info[a]["train_seconds"] = round(time.time() - ta, 1) if not multihead else 0.0
         C = confusion(y[iva], m.predict(sub(feats["pool"], iva)), classes)
+        if args.save_models and not multihead:
+            save_attr_model(args.model, m, a, mdir)
 
         ti = time.time()
         pred_pool = m.predict(feats["pool"])
@@ -478,7 +578,6 @@ def main():
         print(f"[{args.model}] {a}: " + ", ".join(f"{r['eval_set']} kappa {r['kappa']:.3f}"
                                                    for r in rows if r["attribute"] == a), flush=True)
 
-    out = Path(args.out) / args.model
     out.mkdir(parents=True, exist_ok=True)
     res = pd.DataFrame(rows)
     res.insert(0, "model", args.model)

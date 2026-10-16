@@ -84,6 +84,7 @@ def main():
     p.add_argument("--max_cells", type=int, default=30)
     p.add_argument("--loop_annotator", default="qwen", choices=["qwen", "inherited", "classifier"])
     p.add_argument("--eval_annotator", default="qwen", choices=["qwen"])
+    p.add_argument("--classifier_spec", default=None, help="best_annotator.json, for --loop_annotator classifier")
     p.add_argument("--test_ref", required=True, help="test set with eval-annotator labels (created if missing)")
     p.add_argument("--K", type=int, default=2000)
     p.add_argument("--L", type=int, default=6, help="variations per survivor (MAPLE PE_L_random)")
@@ -118,7 +119,8 @@ def main():
               logits_processors=[SuppressChineseLogitsProcessor], seed=args.seed)
     var_sp = SamplingParams(temperature=1.0, top_p=0.95, max_tokens=1024)
 
-    loop_ann = make_annotator(args.loop_annotator, args.maple_dir, llm=llm, model=args.model_id)
+    loop_ann = make_annotator(args.loop_annotator, args.maple_dir, llm=llm, model=args.model_id,
+                              classifier_spec=args.classifier_spec)
     eval_ann = loop_ann if args.eval_annotator == args.loop_annotator else \
         make_annotator(args.eval_annotator, args.maple_dir, llm=llm, model=args.model_id)
     emb = Embedder()

@@ -18,7 +18,7 @@ Round 0 reuses the pre-vote pool from `gen_round0.py`, so all λ runs start from
 
 - `qwen`: local Qwen (shares the generator's vLLM engine), MAPLE prompt, guided JSON, greedy. **Ground truth for now.**
 - `inherited`: requested AIM metadata carried by each row (MAPLE's labels).
-- `classifier`: pending, to be filled with the model chosen from `reannotate/`.
+- `classifier`: the best per-attribute classifier from `reannotate/` (`reannotate/select_annotator.py` → `best_annotator.json`, pass it with `--classifier_spec`). It predicts the quota's blind content attributes; the other attributes keep inherited labels (the quota does not use them).
 
 `--loop_annotator` = labels used by the quota; evaluation always uses `--eval_annotator` (qwen). `word_count` is always measured.
 
@@ -40,3 +40,12 @@ cat $PE_DATA/quota_sweep/eps4.0/SWEEP.md          # updated after every finished
 
 Options: `LAMS="0 0.25 0.5 0.75 1"`, `ANNOTATORS="qwen inherited"`, `SEEDS="0 1"`, `SCHEDULE=constant`, `EPS=1.0`
 (needs that ε's round-0 pool), `GPUS=1,2`. One run per GPU at a time; finished runs are skipped, unfinished ones resume.
+
+## Re-annotating + sweep in one 24-hour job (3 GPUs)
+
+`run_reannotate_then_quota_sweep.sh` (repo root): GPUs A, B run the re-annotating experiment (Qwen labels → 7 classifiers with weights saved → report → best classifier per blind attribute), while GPU C prepares the test reference and starts sweep jobs that need no classifier. Then all three GPUs take sweep jobs from one priority list: MAPLE baseline (λ = 0, run once and shared by every annotator), classifier λ ∈ {1, 0.5, 0.75, 0.25}, qwen λ ∈ {1, 0.5, 0.75, 0.25}, inherited λ ∈ {1, 0.5}, a second seed for the baseline and classifier λ ∈ {1, 0.5} and qwen λ = 1, then the remaining inherited and classifier seed-1 points. No new job starts in the last `MARGIN` (3) hours.
+
+```bash
+tmux new -d -s all "export PE_DATA=$PE_DATA HF_HOME=$HF_HOME; bash ~/PE-metadata/run_reannotate_then_quota_sweep.sh"
+tail -f $PE_DATA/pipeline/logs/*.log
+```

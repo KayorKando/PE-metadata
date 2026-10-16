@@ -12,8 +12,10 @@ Available:
               greedy. Treated as the ground-truth annotator for now. Shares the generator's
               vLLM engine when given one (no second model in memory); caches by text, so
               survivors are not re-annotated.
-  classifier  PENDING: a small per-attribute classifier trained in reannotate/ (to be chosen
-              from the re-annotating results). Raises until it is plugged in.
+  classifier  the best per-attribute classifier from the re-annotating experiment
+              (reannotate/select_annotator.py -> best_annotator.json). Only the attributes in
+              that file are predicted (the quota's blind content attributes); the others keep
+              their inherited labels, which the quota does not use.
 
 To add one: subclass Annotator, implement _label_content(texts, df), register in make_annotator.
 """
@@ -89,16 +91,28 @@ class QwenAnnotator(Annotator):
 class ClassifierAnnotator(Annotator):
     name = "classifier"
 
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError("classifier annotator is pending: choose a model from the reannotate/ "
-                                  "results, then load it here and implement _label_content")
+    def __init__(self, spec_path):
+        import json
+        from reannotate.train_classifier import load_predictor
+        spec = json.loads(Path(spec_path).read_text())
+        self.models = {a: v["model"] for a, v in spec["attributes"].items()}
+        self.pred = {a: load_predictor(spec["results_dir"], m, a) for a, m in self.models.items()}
+        print("classifier annotator:", self.models, flush=True)
+
+    def _label_content(self, texts, df):
+        out = clean_labels(df, CONTENT)  # inherited, replaced below for the classified attributes
+        for a, f in self.pred.items():
+            out[a] = clean_labels(pd.DataFrame({a: f(texts)}), [a])[a]
+        return out
 
 
-def make_annotator(name, maple_dir=None, llm=None, model=None):
+def make_annotator(name, maple_dir=None, llm=None, model=None, classifier_spec=None):
     if name == "inherited":
         return InheritedAnnotator()
     if name == "qwen":
         return QwenAnnotator(maple_dir, llm=llm, **({"model": model} if model else {}))
     if name == "classifier":
-        return ClassifierAnnotator()
+        if not classifier_spec:
+            raise ValueError("classifier annotator needs --classifier_spec (best_annotator.json)")
+        return ClassifierAnnotator(classifier_spec)
     raise ValueError(f"unknown annotator {name}")

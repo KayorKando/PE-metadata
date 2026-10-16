@@ -23,7 +23,15 @@ def load(root):
             r.update(annotator=f.parent.parent.name, lam=float(m.group(1)), seed=int(m.group(2) or 0),
                      done=(f.parent / "DONE").exists())
             rows.append(r)
-    return pd.DataFrame(rows)
+    R = pd.DataFrame(rows)
+    # "maple" = the shared lambda = 0 baseline (the quota is off, so loop labels do not matter):
+    # show it as the lambda = 0 point of every annotator's curve.
+    if not R.empty and "maple" in set(R.annotator):
+        base = R[R.annotator == "maple"]
+        others = [a for a in R.annotator.unique() if a != "maple"]
+        R = pd.concat([R[R.annotator != "maple"]] + [base.assign(annotator=a) for a in others] +
+                      ([] if others else [base]), ignore_index=True)
+    return R
 
 
 def md(df):

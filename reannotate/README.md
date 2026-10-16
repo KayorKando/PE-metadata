@@ -37,3 +37,5 @@ cat $PE_DATA/reannotate/eps4.0/results/REPORT.md
 ```
 
 Settings: `EPS`, `GPUS` (default `1,2`), `PRIVATE_SAMPLE` (3000), `QWEN` (annotator model). Finished steps are skipped on a rerun.
+
+`--save_models` stores each trained classifier under `results/<model>/models/`; `select_annotator.py` picks the best one per attribute (κ vs Qwen on `pool_test_vs_qwen`, ties to the cheaper model) for the quota sweep (`quota_sweep/annotators.py`, `classifier`).
