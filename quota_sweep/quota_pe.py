@@ -77,9 +77,9 @@ def main():
     p.add_argument("--maple_dir", required=True)
     p.add_argument("--pool_csv", required=True, help="round-0 candidates before the vote (gen_round0.py)")
     p.add_argument("--eps", default="4.0", choices=list(EPS_SETTINGS))
-    p.add_argument("--lam", type=float, required=True, help="lambda (its final value under the linear schedule)")
-    p.add_argument("--schedule", default="linear", choices=["linear", "constant"],
-                   help="linear: lambda_t = lam * t / T (0 at round 0); constant: lambda_t = lam")
+    p.add_argument("--lam", type=float, required=True, help="lambda (under --schedule linear: its last-round value)")
+    p.add_argument("--schedule", default="constant", choices=["constant", "linear"],
+                   help="constant: lambda_t = lam; linear: lambda_t = lam * t / T (0 at round 0)")
     p.add_argument("--blind", nargs="+", default=["word_count", "sample_size", "dominant_data_type"])
     p.add_argument("--max_cells", type=int, default=30)
     p.add_argument("--loop_annotator", default="qwen", choices=["qwen", "inherited", "classifier"])

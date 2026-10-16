@@ -15,14 +15,16 @@
 # as soon as best_annotator.json exists. No new job starts after HOURS - MARGIN hours; a job cut
 # off by the deadline resumes on the next invocation (finished ones are skipped).
 #
-# Settings: GPUS (default 0,1,2: A,B,C), HOURS (24), MARGIN (3), EPS (4.0), SCHEDULE (linear),
+# lambda is constant over rounds for every main job; the linear schedule (lambda_t = lambda t / T)
+# is run only at the end of the list, if time is left (results under <annotator>-linear/).
+#
+# Settings: GPUS (default 0,1,2: A,B,C), HOURS (24), MARGIN (3), EPS (4.0),
 #           PRIVATE_SAMPLE (3000), MAPLE_ENV, PE_ENV.
 set -uo pipefail
 GPUS=${GPUS:-0,1,2}
 HOURS=${HOURS:-24}
 MARGIN=${MARGIN:-3}
 EPS=${EPS:-4.0}
-SCHEDULE=${SCHEDULE:-linear}
 PRIVATE_SAMPLE=${PRIVATE_SAMPLE:-3000}
 : "${PE_DATA:?set PE_DATA, e.g. export PE_DATA=/data/\$USER/PE-metadata}"
 USER=${USER:-$(id -un)}
@@ -89,27 +91,33 @@ phase_a() {
 }
 
 # ---------------- B. quota sweep: one priority list, any free GPU ----------------
-# job = "annotator seed lambda"; maple = the lambda = 0 baseline (quota off; loop labels unused)
-JOBS=("maple 0 0"
-      "classifier 0 1" "classifier 0 0.5" "classifier 0 0.75" "classifier 0 0.25"
-      "qwen 0 1" "qwen 0 0.5" "qwen 0 0.75" "qwen 0 0.25"
-      "inherited 0 1" "inherited 0 0.5"
-      "maple 1 0" "classifier 1 1" "classifier 1 0.5" "qwen 1 1"
-      "inherited 0 0.75" "inherited 0 0.25" "classifier 1 0.75" "classifier 1 0.25")
-job_dir() { local n="lam$3"; [ "$2" = 0 ] || n="${n}_seed$2"; echo "$ROOT/$1/$n"; }
+# job = "annotator seed lambda schedule"; maple = the lambda = 0 baseline (quota off; loop labels
+# unused; identical under both schedules). Constant schedule first, linear only if time is left.
+JOBS=("maple 0 0 constant"
+      "classifier 0 1 constant" "classifier 0 0.5 constant" "classifier 0 0.75 constant" "classifier 0 0.25 constant"
+      "qwen 0 1 constant" "qwen 0 0.5 constant" "qwen 0 0.75 constant" "qwen 0 0.25 constant"
+      "inherited 0 1 constant" "inherited 0 0.5 constant"
+      "maple 1 0 constant" "classifier 1 1 constant" "classifier 1 0.5 constant" "qwen 1 1 constant"
+      "inherited 0 0.75 constant" "inherited 0 0.25 constant" "classifier 1 0.75 constant" "classifier 1 0.25 constant"
+      "classifier 0 1 linear" "classifier 0 0.5 linear" "classifier 0 0.75 linear" "classifier 0 0.25 linear"
+      "qwen 0 1 linear" "qwen 0 0.5 linear" "inherited 0 1 linear")
+job_dir() {  # ann seed lam schedule
+  local n="lam$3" g="$1"; [ "$2" = 0 ] || n="${n}_seed$2"; [ "$4" = linear ] && g="$1-linear"
+  echo "$ROOT/$g/$n"; }
 ready() { [ "$1" != classifier ] || [ -s "$SPEC" ]; }
 waiting_possible() { [ -f "$REANN/phaseA.running" ]; }   # classifier jobs may still become ready
 
-run_job() {  # gpu ann seed lam
-  local gpu=$1 ann=$2 seed=$3 lam=$4 out loop extra=()
-  out=$(job_dir "$ann" "$seed" "$lam")
+run_job() {  # gpu ann seed lam schedule
+  local gpu=$1 ann=$2 seed=$3 lam=$4 sched=$5 out loop extra=()
+  out=$(job_dir "$ann" "$seed" "$lam" "$sched")
   loop=$ann; [ "$ann" = maple ] && loop=inherited
   [ "$ann" = classifier ] && extra=(--classifier_spec "$SPEC")
-  stamp "B. run $ann seed=$seed lam=$lam on GPU $gpu"
+  stamp "B. run $ann seed=$seed lam=$lam $sched on GPU $gpu"
   CUDA_VISIBLE_DEVICES=$gpu "$MPY" quota_sweep/quota_pe.py --maple_dir "$PE_DATA/MAPLE" --pool_csv "$POOL" \
-    --eps "$EPS" --lam "$lam" --schedule "$SCHEDULE" --loop_annotator "$loop" --seed "$seed" \
-    --test_ref "$TEST_REF" --out "$out" "${extra[@]}" > "$LOG/B_${ann}_s${seed}_lam${lam}.log" 2>&1 \
-    && stamp "B. done $ann seed=$seed lam=$lam" || stamp "B. FAILED $ann seed=$seed lam=$lam (see $LOG/B_${ann}_s${seed}_lam${lam}.log)"
+    --eps "$EPS" --lam "$lam" --schedule "$sched" --loop_annotator "$loop" --seed "$seed" \
+    --test_ref "$TEST_REF" --out "$out" "${extra[@]}" > "$LOG/B_${ann}_${sched}_s${seed}_lam${lam}.log" 2>&1 \
+    && stamp "B. done $ann seed=$seed lam=$lam $sched" \
+    || stamp "B. FAILED $ann seed=$seed lam=$lam $sched (see $LOG/B_${ann}_${sched}_s${seed}_lam${lam}.log)"
   "$PPY" quota_sweep/summarize.py --root "$ROOT" > /dev/null 2>&1 || true
 }
 
@@ -119,12 +127,12 @@ worker() {  # gpu
     if [ "$(hours_left)" -lt $(( MARGIN * 3600 )) ]; then stamp "B. GPU $gpu: less than ${MARGIN}h left, no new job"; return; fi
     local picked="" pending=0
     for job in "${JOBS[@]}"; do
-      read -r ann seed lam <<< "$job"
-      [ -f "$(job_dir "$ann" "$seed" "$lam")/DONE" ] && continue
+      read -r ann seed lam sched <<< "$job"
+      [ -f "$(job_dir "$ann" "$seed" "$lam" "$sched")/DONE" ] && continue
       if ! ready "$ann"; then pending=1; continue; fi
-      if mkdir "$CLAIMS/${ann}_${seed}_${lam}" 2>/dev/null; then picked="$job"; break; fi
+      if mkdir "$CLAIMS/${ann}_${seed}_${lam}_${sched}" 2>/dev/null; then picked="$job"; break; fi
     done
-    if [ -n "$picked" ]; then read -r ann seed lam <<< "$picked"; run_job "$gpu" "$ann" "$seed" "$lam"; continue; fi
+    if [ -n "$picked" ]; then read -r ann seed lam sched <<< "$picked"; run_job "$gpu" "$ann" "$seed" "$lam" "$sched"; continue; fi
     if [ $pending = 1 ] && waiting_possible; then sleep 60; continue; fi
     stamp "B. GPU $gpu: nothing left to run"; return
   done

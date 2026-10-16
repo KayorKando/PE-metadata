@@ -8,7 +8,7 @@ rest merged), quotas
 $$K_c = \mathrm{round}_{\mathrm{LR}}\Big(K\,\frac{\hat P(c)^{\lambda_t}\,R_t(c)^{1-\lambda_t}}{\sum_{c'} \hat P(c')^{\lambda_t} R_t(c')^{1-\lambda_t}}\Big)$$
 
 ($R_t$ = composition of MAPLE's top-K, $\hat P$ = AIM target), argmax by vote inside each cell, and water-filling when a
-cell has too few candidates. λ = 0 is MAPLE. Schedule `linear` (default): $\lambda_t = \lambda\,t/T$; `constant`: $\lambda_t = \lambda$.
+cell has too few candidates. λ = 0 is MAPLE. Schedule `constant` (default): $\lambda_t = \lambda$; `linear`: $\lambda_t = \lambda\,t/T$.
 No refill yet: the `shortfall` column reports how many quota slots had no candidate (if it is large, refill via
 RANDOM_API is the next thing to add).
 
@@ -38,12 +38,12 @@ tail -f $PE_DATA/quota_sweep/eps4.0/logs/*.log
 cat $PE_DATA/quota_sweep/eps4.0/SWEEP.md          # updated after every finished run; frontier.png, curves.png
 ```
 
-Options: `LAMS="0 0.25 0.5 0.75 1"`, `ANNOTATORS="qwen inherited"`, `SEEDS="0 1"`, `SCHEDULE=constant`, `EPS=1.0`
+Options: `LAMS="0 0.25 0.5 0.75 1"`, `ANNOTATORS="qwen inherited"`, `SEEDS="0 1"`, `SCHEDULE=linear`, `EPS=1.0`
 (needs that ε's round-0 pool), `GPUS=1,2`. One run per GPU at a time; finished runs are skipped, unfinished ones resume.
 
 ## Re-annotating + sweep in one 24-hour job (3 GPUs)
 
-`run_reannotate_then_quota_sweep.sh` (repo root): GPUs A, B run the re-annotating experiment (Qwen labels → 7 classifiers with weights saved → report → best classifier per blind attribute), while GPU C prepares the test reference and starts sweep jobs that need no classifier. Then all three GPUs take sweep jobs from one priority list: MAPLE baseline (λ = 0, run once and shared by every annotator), classifier λ ∈ {1, 0.5, 0.75, 0.25}, qwen λ ∈ {1, 0.5, 0.75, 0.25}, inherited λ ∈ {1, 0.5}, a second seed for the baseline and classifier λ ∈ {1, 0.5} and qwen λ = 1, then the remaining inherited and classifier seed-1 points. No new job starts in the last `MARGIN` (3) hours.
+`run_reannotate_then_quota_sweep.sh` (repo root): GPUs A, B run the re-annotating experiment (Qwen labels → 7 classifiers with weights saved → report → best classifier per blind attribute), while GPU C prepares the test reference and starts sweep jobs that need no classifier. Then all three GPUs take sweep jobs from one priority list: MAPLE baseline (λ = 0, run once and shared by every annotator), classifier λ ∈ {1, 0.5, 0.75, 0.25}, qwen λ ∈ {1, 0.5, 0.75, 0.25}, inherited λ ∈ {1, 0.5}, a second seed for the baseline and classifier λ ∈ {1, 0.5} and qwen λ = 1, then the remaining inherited and classifier seed-1 points, all with constant λ. Only after these, if time is left: the linear schedule for classifier λ ∈ {1, 0.5, 0.75, 0.25}, qwen λ ∈ {1, 0.5}, inherited λ = 1 (results under `<annotator>-linear/`). No new job starts in the last `MARGIN` (3) hours.
 
 ```bash
 tmux new -d -s all "export PE_DATA=$PE_DATA HF_HOME=$HF_HOME; bash ~/PE-metadata/run_reannotate_then_quota_sweep.sh"

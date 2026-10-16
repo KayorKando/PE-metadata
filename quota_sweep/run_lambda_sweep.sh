@@ -9,7 +9,7 @@
 #   LAMS        lambda values             (default "0 0.25 0.5 0.75 1"; 0 = MAPLE)
 #   ANNOTATORS  in-loop label sources     (default "qwen"; also "inherited")
 #   SEEDS       seeds                     (default "0")
-#   SCHEDULE    linear | constant         (default linear: lambda_t = lambda * t / T)
+#   SCHEDULE    constant | linear         (default constant; linear: lambda_t = lambda * t / T)
 #   EPS         4.0 | 2.0 | 1.0           (default 4.0; needs $PE_DATA/round0/eps$EPS/pool.csv)
 #   GPUS        one run per GPU at a time (default 1,2)
 #   EXTRA       extra flags for quota_pe.py
@@ -18,7 +18,7 @@ set -euo pipefail
 LAMS=${LAMS:-"0 0.25 0.5 0.75 1"}
 ANNOTATORS=${ANNOTATORS:-qwen}
 SEEDS=${SEEDS:-0}
-SCHEDULE=${SCHEDULE:-linear}
+SCHEDULE=${SCHEDULE:-constant}
 EPS=${EPS:-4.0}
 GPUS=${GPUS:-1,2}
 EXTRA=${EXTRA:-}
