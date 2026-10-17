@@ -33,7 +33,8 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from blindness.schema import BIORXIV_SCHEMA, clean_labels  # noqa: E402
 from quota_sweep.annotators import ATTRS, CONTENT, make_annotator  # noqa: E402
-from quota_sweep.quota import assign_cells, build_cell_space, cell_keys, select  # noqa: E402
+from quota_sweep.quota import (assign_cells, build_cell_space, build_marginals, cell_keys,  # noqa: E402
+                               marginal_jsd, select, select_raked)
 from vote_correction import jsd, nearest_pool_index  # noqa: E402
 
 METADATA = CONTENT + ["word_count"]   # MAPLE's 9 metadata columns (word_count = requested length)
@@ -93,7 +94,10 @@ def main():
     p.add_argument("--schedule", default="constant", choices=["constant", "linear"],
                    help="constant: lambda_t = lam; linear: lambda_t = lam * t / T (0 at round 0)")
     p.add_argument("--blind", nargs="+", default=["word_count", "sample_size", "dominant_data_type"])
-    p.add_argument("--max_cells", type=int, default=30)
+    p.add_argument("--cell_mode", default="raking", choices=["raking", "joint"],
+                   help="raking (default): quotas from one-way marginals of B via iterative proportional fitting, "
+                        "no merged cells; joint: top max_cells joint cells + __other__ (first version)")
+    p.add_argument("--max_cells", type=int, default=30, help="joint mode only")
     p.add_argument("--loop_annotator", default="qwen", choices=["qwen", "inherited", "classifier"])
     p.add_argument("--eval_annotator", default="qwen", choices=["qwen"])
     p.add_argument("--classifier_spec", default=None, help="best_annotator.json, for --loop_annotator classifier")
@@ -148,8 +152,11 @@ def main():
                    cache_dir=str(data_root / "cache"))
     aim = pd.read_csv(bio / (f"biorxiv_train_metadata_aim_eps{float(args.eps):.1f}_(1,9).csv"
                              if args.eps != "inf" else "biorxiv_train_metadata.csv"))
-    kept, p_hat = build_cell_space(aim_target_labels(aim, args.blind), args.blind, args.max_cells)
-    (out / "cells.json").write_text(json.dumps({"blind": args.blind, "p_hat": p_hat}, indent=2))
+    aim_lab = aim_target_labels(aim, args.blind)
+    p_marg = build_marginals(aim_lab, args.blind)
+    kept, p_hat = build_cell_space(aim_lab, args.blind, args.max_cells) if args.cell_mode == "joint" else (None, None)
+    (out / "cells.json").write_text(json.dumps({"blind": args.blind, "cell_mode": args.cell_mode,
+                                                "p_marg": p_marg, "p_hat": p_hat}, indent=2))
 
     test_path = Path(args.test_ref)
     if test_path.exists():
@@ -202,9 +209,13 @@ def main():
             hist = hist + rng.normal(scale=sigma, size=len(hist))
         # quota selection on loop labels
         lab = loop_ann.label(cand)
-        cells = assign_cells(lab, args.blind, kept)
         lam_t = lam_at(t, T, args.lam, args.schedule)
-        sel, info = select(hist, cells, p_hat, lam_t, args.K)
+        if args.cell_mode == "joint":
+            cells = assign_cells(lab, args.blind, kept)
+            sel, info = select(hist, cells, p_hat, lam_t, args.K)
+        else:
+            cells = cell_keys(lab, args.blind)
+            sel, info = select_raked(hist, lab, args.blind, p_marg, lam_t, args.K)
         sel_df = cand.iloc[sel].reset_index(drop=True)
         sel_df["vote"] = hist[sel]
         sel_df["cell"] = cells[sel]
@@ -224,12 +235,15 @@ def main():
         m["jsd_mean"] = float(np.mean([m[f"jsd_{a}"] for a in ATTRS]))
         m["jsd_blind_mean"] = float(np.mean([m[f"jsd_{a}"] for a in args.blind]))
         m["jsd_other_mean"] = float(np.mean([m[f"jsd_{a}"] for a in ATTRS if a not in args.blind]))
-        cats = sorted(p_hat)
-        ph = np.array([p_hat[c] for c in cats])
         for src, labs in [("loop", lab), ("eval", ev)]:
-            lc = assign_cells({a: (labs[a][sel] if src == "loop" else labs[a]) for a in args.blind}, args.blind, kept)
-            pc = np.array([np.mean(lc == c) for c in cats])
-            m[f"cell_jsd_vs_phat_{src}_labels"] = float(jensenshannon(pc, ph))
+            sl = {a: (labs[a][sel] if src == "loop" else labs[a]) for a in args.blind}
+            mj = marginal_jsd(sl, args.blind, p_marg)
+            m[f"marg_jsd_vs_phat_{src}_labels"] = float(np.mean(list(mj.values())))
+            if args.cell_mode == "joint":
+                cats = sorted(p_hat)
+                lc = assign_cells(sl, args.blind, kept)
+                m[f"cell_jsd_vs_phat_{src}_labels"] = float(jensenshannon(
+                    np.array([np.mean(lc == c) for c in cats]), np.array([p_hat[c] for c in cats])))
         m["seconds"] = round(time.time() - t0, 1)
         sel_df.to_csv(out / f"round_{t}.csv", index=False)
         with open(mpath, "a") as f:

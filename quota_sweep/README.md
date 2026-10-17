@@ -1,16 +1,24 @@
 # Quota sweep: lambda sweep for the blind-attribute quota (Experiment 2)
 
 MAPLE PE (bioRxiv, ε = 4 by default: T = 4 rounds, noise σ = 2.58, K = 2000, L = 6) with one change in the
-selection step (`quota.py`): cells on the blind attributes B (default `word_count`, `sample_size`,
-`dominant_data_type`, from Experiment 1), at most 30 cells (the 29 most frequent joint cells of the AIM records, the
-rest merged), quotas
+selection step (`quota.py`), on the blind attributes B (default `word_count`, `sample_size`, `dominant_data_type`, from Experiment 1).
 
-$$K_c = \mathrm{round}_{\mathrm{LR}}\Big(K\,\frac{\hat P(c)^{\lambda_t}\,R_t(c)^{1-\lambda_t}}{\sum_{c'} \hat P(c')^{\lambda_t} R_t(c')^{1-\lambda_t}}\Big)$$
+**Quota space = one-way marginals of B (raking, default `--cell_mode raking`).** For each blind attribute the target marginal is
 
-($R_t$ = composition of MAPLE's top-K, $\hat P$ = AIM target), argmax by vote inside each cell, and water-filling when a
-cell has too few candidates. λ = 0 is MAPLE. Schedule `constant` (default): $\lambda_t = \lambda$; `linear`: $\lambda_t = \lambda\,t/T$.
-No refill yet: the `shortfall` column reports how many quota slots had no candidate (if it is large, refill via
-RANDOM_API is the next thing to add).
+$$m_k(v) \;\propto\; \hat P_k(v)^{\lambda}\, R_{t,k}(v)^{1-\lambda}$$
+
+($\hat P_k$ from the AIM records, $R_{t,k}$ = marginal of MAPLE's top-K). Joint-cell weights start from MAPLE's top-K composition
+(smoothed with 5% of the candidate composition) and are fitted to all three marginals by iterative proportional fitting; a cell that
+runs out of candidates is frozen at its supply and the rest of that value's target is spread over the other cells (feasible quotas,
+`capped_cells` in the log). Then largest-remainder rounding, argmax by vote inside each joint cell, water-filling for rounding leftovers.
+λ = 0 is exactly MAPLE. No merged cells, no `__other__`.
+
+The first version (`--cell_mode joint`: the 29 most frequent joint cells + `__other__`) put 47% of the AIM mass into `__other__`,
+where the quota does nothing; it is kept only for reference.
+
+Schedule `constant` (default): $\lambda_t = \lambda$; `linear`: $\lambda_t = \lambda\,t/T$.
+No refill yet: `shortfall` now only counts rounding leftovers; whether the supply binds shows up as `capped_cells` and as the gap
+between `marg_jsd_vs_phat_loop_labels` and 0 at λ = 1.
 
 Round 0 reuses the pre-vote pool from `gen_round0.py`, so all λ runs start from the same candidates.
 
@@ -27,7 +35,7 @@ Round 0 reuses the pre-vote pool from `gen_round0.py`, so all λ runs start from
 - `mauve`: MAPLE's MAUVE (sentence-t5 features) vs the 2,000-text test set
 - `jsd_<attr>`: JSD vs the test set labelled by the same annotator (Qwen; length measured); `jsd_gemini_<attr>`: vs MAPLE's Gemini labels of the test set
 - `jsd_mean` (9 attributes), `jsd_blind_mean` (B), `jsd_other_mean` (the rest)
-- `cell_jsd_vs_phat_{loop,eval}_labels`: how close the survivors' cell distribution is to $\hat P$
+- `marg_jsd_vs_phat_{loop,eval}_labels`: mean over B of JSD(survivors' marginal, $\hat P_k$), with the in-loop and the evaluation labels
 - `moved` (survivors that differ from MAPLE's top-K), `shortfall`, `lam_t`
 
 ## Run (weekend)
