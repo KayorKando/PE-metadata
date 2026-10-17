@@ -62,14 +62,26 @@ def load_mauve(maple_dir):
 
 
 class Embedder:
-    def __init__(self, batch=256):
+    """sentence-t5-base at max_seq_length 1024. Attention memory grows with batch x 1024^2:
+    batch 256 needs ~12 GB and OOMs next to vLLM, batch 32 needs ~1.5 GB."""
+
+    def __init__(self, batch=32):
         from sentence_transformers import SentenceTransformer
         self.m = SentenceTransformer("sentence-t5-base", device="cuda")
         self.m.max_seq_length = 1024
         self.batch = batch
 
     def __call__(self, texts):
-        return self.m.encode(list(texts), batch_size=self.batch, convert_to_numpy=True, show_progress_bar=False)
+        import torch
+        texts = list(texts)
+        order = np.argsort([len(t) for t in texts])          # length-sorted batches: less padding
+        out = np.zeros((len(texts), self.m.get_sentence_embedding_dimension()), np.float32)
+        for i in range(0, len(order), self.batch):
+            idx = order[i:i + self.batch]
+            out[idx] = self.m.encode([texts[j] for j in idx], batch_size=self.batch,
+                                     convert_to_numpy=True, show_progress_bar=False)
+        torch.cuda.empty_cache()
+        return out
 
 
 def main():
@@ -91,7 +103,9 @@ def main():
     p.add_argument("--T", type=int, default=None, help="override MAPLE's number of PE rounds for this eps")
     p.add_argument("--noise", type=float, default=None, help="override MAPLE's noise multiplier for this eps")
     p.add_argument("--model_id", default="Qwen/Qwen2.5-7B-Instruct")
-    p.add_argument("--gpu_mem", type=float, default=0.75, help="vLLM gpu_memory_utilization (leave room for sentence-t5)")
+    p.add_argument("--gpu_mem", type=float, default=0.5,
+                   help="vLLM gpu_memory_utilization; the rest is for sentence-t5 + the classifier annotator")
+    p.add_argument("--emb_batch", type=int, default=32, help="sentence-t5 batch size")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", required=True)
     p.add_argument("--prep_only", action="store_true", help="only build --test_ref (labels of the test set), then exit")
@@ -123,7 +137,7 @@ def main():
                               classifier_spec=args.classifier_spec)
     eval_ann = loop_ann if args.eval_annotator == args.loop_annotator else \
         make_annotator(args.eval_annotator, args.maple_dir, llm=llm, model=args.model_id)
-    emb = Embedder()
+    emb = Embedder(args.emb_batch)
     compute_mauve = load_mauve(args.maple_dir)
 
     # --- private voters, AIM target over cells of B, test reference ---
@@ -228,4 +242,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # vLLM keeps an engine subprocess alive; after an exception the parent would wait on it
+    # forever (seen: OOM at 12:17, process still there 4 h later). Exit hard either way.
+    import traceback
+    code = 0
+    try:
+        main()
+    except SystemExit as e:
+        code = int(e.code or 0)
+    except BaseException:
+        traceback.print_exc()
+        code = 1
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)

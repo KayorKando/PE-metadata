@@ -29,6 +29,7 @@ PRIVATE_SAMPLE=${PRIVATE_SAMPLE:-3000}
 : "${PE_DATA:?set PE_DATA, e.g. export PE_DATA=/data/\$USER/PE-metadata}"
 USER=${USER:-$(id -un)}
 export HF_HOME=${HF_HOME:-/data/$USER/hf_cache}
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 MAPLE_ENV=${MAPLE_ENV:-/data/$USER/envs/maple}
 PE_ENV=${PE_ENV:-/data/$USER/envs/pe-metadata}
 MPY=$MAPLE_ENV/bin/python
