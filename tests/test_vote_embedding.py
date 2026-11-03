@@ -194,3 +194,43 @@ def test_ftembedder_logs_overflow(trained, capsys):
     emb = FTEmbedder(path, batch=8, device="cpu")
     emb(["cell " * 100, "cell gene"])                                # max_len 64: one of two over
     assert "50.0% of 2 texts over 64 tokens" in capsys.readouterr().out
+
+
+# ---------------- Step 3: vote_embedding/check_embedding.py (smoke test) ----------------
+def test_check_embedding_end_to_end(bert, tmp_path, monkeypatch):
+    """Fake pool / private CSVs, tiny BERT for frozen + both arms, random 'sentence-t5'."""
+    import pandas as pd
+    import vote_embedding.check_embedding as ce_mod
+    from vote_embedding.train_embedder import main as train_main
+    rng = np.random.default_rng(0)
+
+    def fake_csv(n, path, seed):
+        df = pd.DataFrame({"text": random_texts(n, seed)})
+        for a, c in BIORXIV_SCHEMA.items():
+            df["map_" + a] = rng.choice(c[:4], n)
+            df[a] = rng.choice(c[:3], n)
+        df["word_count_requested"] = rng.choice([100, 200], n)
+        df.loc[::9, [f"map_{a}" for a in BIORXIV_SCHEMA]] = None
+        df.to_csv(path, index=False)
+        return str(path)
+
+    pool, priv = fake_csv(200, tmp_path / "pool.csv", 0), fake_csv(40, tmp_path / "priv.csv", 1)
+    for loss in ("normsoftmax", "ce"):
+        monkeypatch.setattr("sys.argv", ["x", "--pool_qwen", pool, "--loss", loss, "--model", bert, "--epochs", "1",
+                                         "--max_len", "32", "--out", str(tmp_path / "ft" / loss)])
+        train_main()
+    monkeypatch.setattr(ce_mod, "embed_phi", lambda texts, cache: np.random.default_rng(len(texts)).normal(
+        size=(len(texts), 16)).astype(np.float32))
+    ce_mod.main(["--pool_qwen", pool, "--private_qwen", priv, "--ft_root", str(tmp_path / "ft"),
+                 "--cache_dir", str(tmp_path / "cache"), "--frozen_model", bert, "--repeats", "2",
+                 "--ref_metrics", str(tmp_path / "none.csv")])
+    out = tmp_path / "ft" / "check"
+    per = pd.read_csv(out / "knn_recall_per_repeat.csv")
+    assert set(per.arm) == {"t5", "frozen", "normsoftmax", "ce"}
+    assert set(per.attribute) == set(BIORXIV_SCHEMA) | {"word_count"}
+    assert np.allclose(per[per.arm == "t5"].recall_t5, 1.0)                 # t5 vs itself
+    assert per.recall_t5.between(0, 1).all()
+    ann = pd.read_csv(out / "annotator.csv")
+    assert set(ann.eval_set) == {"pool_test_vs_qwen", "private_sample_vs_qwen"} and set(ann.arm) == {"normsoftmax", "ce"}
+    md = (out / "CHECK.md").read_text()
+    assert "## 1. k-NN" in md and "## 3. Annotator" in md and (out / "knn_kappa.png").exists()
