@@ -129,3 +129,68 @@ def test_heads_keep_schema_order():
     k = {"zeta": 2, "alpha": 3}
     heads = ProxyHeads(8, k)
     assert list(heads(torch.zeros(1, 8))) == ["zeta", "alpha"]
+
+
+# ---------------- Step 2: vote_embedding/embedder.py ----------------
+@pytest.fixture(scope="module")
+def trained(bert, tmp_path_factory):
+    """A briefly trained normsoftmax model saved to disk."""
+    texts, lab = toy_data(48, 1)
+    tr, va = np.arange(32), np.arange(32, 48)
+    classes = {a: sorted(set(v for v in lab[a][tr] if v is not None)) for a in K}
+    tk = tk_for(bert)
+    ids = tk.encode(texts)
+    torch.manual_seed(0)
+    enc, heads = make_model(bert, "normsoftmax", {a: len(c) for a, c in classes.items()})
+    hist = train(enc, heads, tk, [ids[i] for i in tr], encode_labels(lab, tr, classes),
+                 [ids[i] for i in va], encode_labels(lab, va, classes), classes, epochs=1, log=lambda s: None)
+    path = tmp_path_factory.mktemp("ft") / "normsoftmax"
+    save(path, enc, heads, tk.tok, classes, {"loss": "normsoftmax", "sigma": 0.05, "max_len": 64}, hist)
+    return path, texts
+
+
+def test_ftembedder_matches_model_and_keeps_order(trained):
+    from vote_embedding.embedder import FTEmbedder
+    path, texts = trained
+    emb = FTEmbedder(path, batch=8, device="cpu", log_overflow=False)
+    X = emb(texts)
+    assert X.dtype == np.float32 and X.shape == (len(texts), 768)
+    assert np.allclose(np.linalg.norm(X, axis=1), 1, atol=1e-5)
+    single = np.concatenate([emb([t]) for t in texts[:6]])        # length-sorted batching restores order
+    assert np.allclose(single, X[:6], atol=1e-5)
+    enc, heads, classes, _ = load(path)
+    p = predict_ids(enc, heads, emb.tk, emb.tk.encode(texts))
+    lab = emb.predict(texts)
+    for a in K:
+        assert np.array_equal(lab[a], np.array(classes[a])[p[a]])    # nearest proxy
+        # nearest proxy = largest cosine = smallest L2 to the unit proxy
+        P = heads.proxies(a).detach().numpy()
+        assert np.array_equal(p[a], ((X[:, None] - P[None]) ** 2).sum(-1).argmin(1))
+    assert emb([]).shape == (0, 768)
+
+
+def test_ftembedder_cache_round_trip(trained, tmp_path, monkeypatch):
+    from vote_embedding.embedder import FTEmbedder
+    path, texts = trained
+    emb = FTEmbedder(path, batch=8, device="cpu", cache_dir=tmp_path, log_overflow=False)
+    X1 = emb(texts)
+    files = list(tmp_path.glob(f"emb_{emb.name}_*.npy"))
+    assert len(files) == 1 and emb.name.startswith("ft-normsoftmax-")
+
+    def boom(*a, **k):
+        raise AssertionError("model called despite cache")
+    monkeypatch.setattr(emb, "encode", boom)
+    assert np.array_equal(emb(texts), X1)                            # served from disk
+    with pytest.raises(AssertionError):
+        emb(texts[:-1])                                              # other texts -> other key
+    monkeypatch.undo()
+    emb2 = FTEmbedder(path, batch=8, device="cpu", cache_dir=tmp_path, log_overflow=False)
+    assert emb2.name == emb.name and np.array_equal(emb2(texts), X1)  # same weights -> same key
+
+
+def test_ftembedder_logs_overflow(trained, capsys):
+    from vote_embedding.embedder import FTEmbedder
+    path, _ = trained
+    emb = FTEmbedder(path, batch=8, device="cpu")
+    emb(["cell " * 100, "cell gene"])                                # max_len 64: one of two over
+    assert "50.0% of 2 texts over 64 tokens" in capsys.readouterr().out
