@@ -23,6 +23,9 @@ ENV_PATH=$WORK/envs/$ENV_NAME
 conda activate "$ENV_PATH"
 pip install vllm==0.10.1.1 transformers==4.55.4 "numpy<2.3" sentence-transformers scikit-learn pandas scipy \
   matplotlib joblib faiss-cpu mauve-text "huggingface_hub>=0.34,<1.0" datasets   # hub < 1.0 for transformers 4.55.4
+# Private Evolution library (MAPLE imports pe.*): the exact commit of the lab env; --no-deps keeps the pins above
+pip install --no-deps "private-evolution @ git+https://github.com/microsoft/DPSDA.git@c109ea5e90cddfd309903e8c877bdea1565fe366"
+pip check
 
 python - "$QWEN" <<'PY'
 import sys
