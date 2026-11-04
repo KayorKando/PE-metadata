@@ -9,6 +9,11 @@ differ only in selection). Then for t = 0..T:
 Labels used *inside* the loop come from --loop_annotator; evaluation always uses
 --eval_annotator (default qwen = ground truth for now). word_count is always measured.
 
+Vote embedding: --vote_emb t5 (default, MAPLE's sentence-t5) or ft (the fine-tuned BiomedBERT
+from vote_embedding/train_embedder.py, --vote_emb_path). The vote uses it for both the private
+points and the candidates. MAUVE always stays on sentence-t5: with ft, t5 features are computed
+for the K survivors only; with t5 the old code path (Xs = Xc[sel]) is unchanged.
+
 One GPU per run: vLLM (generation + Qwen annotation share one engine) and sentence-t5.
 Resumable: finished rounds are reloaded and the run continues after the last one.
 
@@ -109,7 +114,11 @@ def main():
     p.add_argument("--model_id", default="Qwen/Qwen2.5-7B-Instruct")
     p.add_argument("--gpu_mem", type=float, default=0.5,
                    help="vLLM gpu_memory_utilization; the rest is for sentence-t5 + the classifier annotator")
-    p.add_argument("--emb_batch", type=int, default=32, help="sentence-t5 batch size")
+    p.add_argument("--emb_batch", type=int, default=32, help="sentence-t5 (and ft vote embedding) batch size")
+    p.add_argument("--vote_emb", default="t5", choices=["t5", "ft"],
+                   help="t5: sentence-t5 (MAPLE); ft: fine-tuned BiomedBERT (vote_embedding/). MAUVE stays on t5")
+    p.add_argument("--vote_emb_path", default=None,
+                   help="trained ft embedder (default $PE_DATA/vote_embedding/eps<eps>/normsoftmax)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", required=True)
     p.add_argument("--prep_only", action="store_true", help="only build --test_ref (labels of the test set), then exit")
@@ -120,8 +129,10 @@ def main():
     sigma = args.noise if args.noise is not None else sigma
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "config.json").write_text(json.dumps({**vars(args), "T": T, "sigma": sigma}, indent=2))
     data_root = Path(os.environ.get("PE_DATA", "."))
+    if args.vote_emb == "ft" and args.vote_emb_path is None:
+        args.vote_emb_path = str(data_root / "vote_embedding" / f"eps{args.eps}" / "normsoftmax")
+    (out / "config.json").write_text(json.dumps({**vars(args), "T": T, "sigma": sigma}, indent=2))
     bio = Path(args.maple_dir) / "biorxiv"
 
     # --- MAPLE pieces ---
@@ -141,15 +152,23 @@ def main():
                               classifier_spec=args.classifier_spec)
     eval_ann = loop_ann if args.eval_annotator == args.loop_annotator else \
         make_annotator(args.eval_annotator, args.maple_dir, llm=llm, model=args.model_id)
-    emb = Embedder(args.emb_batch)
+    emb = Embedder(args.emb_batch)  # sentence-t5: MAUVE always; also the vote with --vote_emb t5
+    vemb = emb
+    if args.vote_emb == "ft":
+        from vote_embedding.embedder import FTEmbedder
+        vemb = FTEmbedder(args.vote_emb_path, batch=args.emb_batch, cache_dir=str(data_root / "cache"))
+        print(f"vote embedding: {vemb.name} from {args.vote_emb_path}", flush=True)
     compute_mauve = load_mauve(args.maple_dir)
 
     # --- private voters, AIM target over cells of B, test reference ---
     from blindness.embed import embed
     priv = pd.read_csv(bio / "biorxiv_train_metadata.csv")
     priv = priv[priv["text"].notna()].reset_index(drop=True)
-    X_priv = embed(priv["text"].astype(str).tolist(), "sentence-t5-base", 1024, batch_size=256,
-                   cache_dir=str(data_root / "cache"))
+    if args.vote_emb == "t5":
+        X_priv = embed(priv["text"].astype(str).tolist(), "sentence-t5-base", 1024, batch_size=256,
+                       cache_dir=str(data_root / "cache"))
+    else:
+        X_priv = vemb(priv["text"].astype(str).tolist())  # cached under $PE_DATA/cache
     aim = pd.read_csv(bio / (f"biorxiv_train_metadata_aim_eps{float(args.eps):.1f}_(1,9).csv"
                              if args.eps != "inf" else "biorxiv_train_metadata.csv"))
     aim_lab = aim_target_labels(aim, args.blind)
@@ -203,7 +222,7 @@ def main():
             cand = variations(sel_df)
         cand = cand[cand["text"].astype(str).str.strip() != ""].reset_index(drop=True)
         # vote
-        Xc = emb(cand["text"].astype(str).tolist())
+        Xc = vemb(cand["text"].astype(str).tolist())
         hist = np.bincount(nearest_pool_index(X_priv, Xc), minlength=len(cand)).astype(float)
         if sigma:
             hist = hist + rng.normal(scale=sigma, size=len(hist))
@@ -225,7 +244,7 @@ def main():
         ev = eval_ann.label(sel_df)
         for a in ATTRS:
             sel_df[f"eval_{a}"] = ev[a]
-        Xs = Xc[sel]
+        Xs = Xc[sel] if args.vote_emb == "t5" else emb(sel_df["text"].astype(str).tolist())  # MAUVE on t5
         m = dict(round=t, lam_t=lam_t, n_candidates=len(cand), shortfall=info["shortfall"], moved=info["moved"],
                  mauve=float(compute_mauve(p_features=X_test, q_features=Xs).mauve))
         for a in ATTRS:

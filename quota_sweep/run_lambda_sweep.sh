@@ -7,7 +7,10 @@
 #
 # Settings (environment variables):
 #   LAMS        lambda values             (default "0 0.25 0.5 0.75 1"; 0 = MAPLE)
-#   ANNOTATORS  in-loop label sources     (default "qwen"; also "inherited")
+#   ANNOTATORS  in-loop label sources     (default "qwen"; also "inherited", "classifier" = $SPEC)
+#   VOTE_EMBS   vote embeddings           (default "t5"; "ft" = fine-tuned BiomedBERT, MAUVE stays on t5;
+#               ft runs go to <annotator>-ft/, and the embedder is trained first if missing)
+#   VOTE_EMB_PATH  ft embedder            (default $PE_DATA/vote_embedding/eps$EPS/normsoftmax)
 #   SEEDS       seeds                     (default "0")
 #   SCHEDULE    constant | linear         (default constant; linear: lambda_t = lambda * t / T)
 #   EPS         4.0 | 2.0 | 1.0           (default 4.0; needs $PE_DATA/round0/eps$EPS/pool.csv)
@@ -17,6 +20,7 @@
 set -euo pipefail
 LAMS=${LAMS:-"0 0.25 0.5 0.75 1"}
 ANNOTATORS=${ANNOTATORS:-qwen}
+VOTE_EMBS=${VOTE_EMBS:-t5}
 SEEDS=${SEEDS:-0}
 SCHEDULE=${SCHEDULE:-constant}
 EPS=${EPS:-4.0}
@@ -31,6 +35,8 @@ POOL=$PE_DATA/round0/eps$EPS/pool.csv
 ROOT=$PE_DATA/quota_sweep/eps$EPS
 LOG=$ROOT/logs
 TEST_REF=$PE_DATA/quota_sweep/test_ref_qwen.csv
+SPEC=${SPEC:-$PE_DATA/reannotate/eps$EPS/best_annotator.json}
+VOTE_EMB_PATH=${VOTE_EMB_PATH:-$PE_DATA/vote_embedding/eps$EPS/normsoftmax}
 mkdir -p "$LOG"
 IFS=, read -ra G <<< "$GPUS"
 MPY=$MAPLE_ENV/bin/python
@@ -50,23 +56,35 @@ if [ ! -s "$TEST_REF" ]; then
     --eps "$EPS" --lam 0 --test_ref "$TEST_REF" --out "$ROOT/_prep" --prep_only > "$LOG/1_test_ref.log" 2>&1
 fi
 
+# --- 1b. fine-tuned vote embedding (once) ---
+if [[ " $VOTE_EMBS " == *" ft "* ]] && [ ! -s "$VOTE_EMB_PATH/heads.pt" ]; then
+  stamp "1b. training the ft vote embedding -> $VOTE_EMB_PATH"
+  CUDA_VISIBLE_DEVICES=${G[0]} "$PE_ENV/bin/python" vote_embedding/train_embedder.py --loss normsoftmax --eps "$EPS" \
+    --pool_qwen "$PE_DATA/reannotate/eps$EPS/pool_qwen.csv" --out "$VOTE_EMB_PATH" > "$LOG/1b_train_vote_emb.log" 2>&1 \
+    || { stamp "training failed, see $LOG/1b_train_vote_emb.log"; exit 1; }
+fi
+
 # --- 2. jobs, round-robin over GPUs; each GPU runs its jobs one after another ---
 jobs=()
-for ann in $ANNOTATORS; do for seed in $SEEDS; do for lam in $LAMS; do jobs+=("$ann $seed $lam"); done; done; done
+for vemb in $VOTE_EMBS; do for ann in $ANNOTATORS; do for seed in $SEEDS; do for lam in $LAMS; do
+  jobs+=("$ann $seed $lam $vemb"); done; done; done; done
 stamp "2. ${#jobs[@]} runs on GPUs ${GPUS}"
 worker() {  # gpu index
   local gi=$1 j=0
   for job in "${jobs[@]}"; do
     if [ $((j % ${#G[@]})) -eq "$gi" ]; then
-      read -r ann seed lam <<< "$job"
+      read -r ann seed lam vemb <<< "$job"
       name="lam${lam}"; [ "$seed" = 0 ] || name="${name}_seed${seed}"
-      out="$ROOT/$ann/$name"
-      if [ -f "$out/DONE" ]; then stamp "skip $ann/$name (done)"; else
-        stamp "run $ann/$name on GPU ${G[$gi]}"
+      dir=$ann; vflags=(); aflags=()
+      [ "$vemb" = ft ] && { dir="${ann}-ft"; vflags=(--vote_emb ft --vote_emb_path "$VOTE_EMB_PATH"); }
+      [ "$ann" = classifier ] && aflags=(--classifier_spec "$SPEC")
+      out="$ROOT/$dir/$name"
+      if [ -f "$out/DONE" ]; then stamp "skip $dir/$name (done)"; else
+        stamp "run $dir/$name on GPU ${G[$gi]}"
         CUDA_VISIBLE_DEVICES=${G[$gi]} "$MPY" quota_sweep/quota_pe.py --maple_dir "$PE_DATA/MAPLE" --pool_csv "$POOL" \
           --eps "$EPS" --lam "$lam" --schedule "$SCHEDULE" --loop_annotator "$ann" --seed "$seed" \
-          --test_ref "$TEST_REF" --out "$out" $EXTRA > "$LOG/${ann}_${name}.log" 2>&1 \
-          && stamp "done $ann/$name" || stamp "FAILED $ann/$name, see $LOG/${ann}_${name}.log"
+          --test_ref "$TEST_REF" --out "$out" "${vflags[@]}" "${aflags[@]}" $EXTRA > "$LOG/${dir}_${name}.log" 2>&1 \
+          && stamp "done $dir/$name" || stamp "FAILED $dir/$name, see $LOG/${dir}_${name}.log"
         "$PE_ENV/bin/python" quota_sweep/summarize.py --root "$ROOT" > /dev/null 2>&1 || true   # keep SWEEP.md current
       fi
     fi
