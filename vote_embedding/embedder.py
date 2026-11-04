@@ -71,8 +71,8 @@ class FTEmbedder:
             return np.load(path)
         X = self.encode(texts)[0]
         if path is not None:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            np.save(path, X)
+            from blindness.embed import save_atomic
+            save_atomic(path, X)  # parallel PE runs share the cache
         return X
 
     def predict(self, texts):

@@ -1,6 +1,7 @@
 """phi = the embedding MAPLE votes with: sentence-t5-base, max_seq_length 1024
 (MAPLE PE.py: --emb_name sentence-t5-base, --emb_dim 1024 sets max_seq_length)."""
 import hashlib
+import os
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,15 @@ def embed(texts, model_name=DEFAULT_MODEL, max_seq_length=1024, batch_size=32, c
     model = SentenceTransformer(model_name, device=_device())
     model.max_seq_length = max_seq_length
     X = model.encode(list(texts), batch_size=batch_size, show_progress_bar=True, convert_to_numpy=True)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.save(path, X)
+    save_atomic(path, X)
     return X
+
+
+def save_atomic(path, X):
+    """Write to a temp file, then rename: parallel jobs sharing the cache never read a half-written file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with open(tmp, "wb") as f:
+        np.save(f, X)
+    os.replace(tmp, path)
