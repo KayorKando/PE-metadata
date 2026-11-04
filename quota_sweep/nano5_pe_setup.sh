@@ -22,7 +22,7 @@ ENV_PATH=$WORK/envs/$ENV_NAME
 [ -x "$ENV_PATH/bin/python" ] || conda create -p "$ENV_PATH" python=3.11 -y
 conda activate "$ENV_PATH"
 pip install vllm==0.10.1.1 transformers==4.55.4 "numpy<2.3" sentence-transformers scikit-learn pandas scipy \
-  matplotlib joblib faiss-cpu mauve-text huggingface_hub datasets
+  matplotlib joblib faiss-cpu mauve-text "huggingface_hub>=0.34,<1.0" datasets   # hub < 1.0 for transformers 4.55.4
 
 python - "$QWEN" <<'PY'
 import sys
