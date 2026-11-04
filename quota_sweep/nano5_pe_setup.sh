@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-time setup for PE runs on NCHC Nano5. Run on the LOGIN node, from the repo root:
 #   cd ~/PE-metadata && bash quota_sweep/nano5_pe_setup.sh
-# Light work only: conda env "maple" (vLLM), model downloads into /work, a Nano5 copy of the
+# Light work only: conda env /work/$USER/envs/maple (vLLM), model downloads into /work, a Nano5 copy of the
 # classifier spec, and a list of the data still missing. No GPU, no PE run, no polling.
 # The env mirrors the lab cluster's MAPLE env (vllm 0.10.1.1, transformers 4.55.4, numpy < 2.3).
 # If the import check at the end fails, compare with `pip freeze` of the lab env and add what is missing.
@@ -16,8 +16,11 @@ mkdir -p "$WORK/logs" "$HF_HOME" "$PE_DATA/cache" "$PE_DATA/quota_sweep/eps$EPS"
 
 module load miniconda3/24.11.1
 eval "$(conda shell.bash hook)"
-conda env list | grep "^$ENV_NAME " >/dev/null || conda create -n "$ENV_NAME" python=3.11 -y
-conda activate "$ENV_NAME"
+# env, pip cache and conda package cache in /work (/home is only 100 GB; vLLM + torch envs are ~10-15 GB each)
+export PIP_CACHE_DIR=$WORK/.cache/pip CONDA_PKGS_DIRS=$WORK/.conda/pkgs
+ENV_PATH=$WORK/envs/$ENV_NAME
+[ -x "$ENV_PATH/bin/python" ] || conda create -p "$ENV_PATH" python=3.11 -y
+conda activate "$ENV_PATH"
 pip install vllm==0.10.1.1 transformers==4.55.4 "numpy<2.3" sentence-transformers scikit-learn pandas scipy \
   matplotlib joblib faiss-cpu mauve-text huggingface_hub
 
@@ -30,6 +33,7 @@ PY
 
 echo
 echo "Data needed under $PE_DATA (copy from the lab cluster's \$PE_DATA, same relative paths):"
+echo "(from the lab cluster: bash quota_sweep/nano5_copy_data.sh <nano5 account>)"
 need() { if [ -e "$PE_DATA/$1" ]; then echo "  ok       $1"; else echo "  MISSING  $1   $2"; fi; }
 need MAPLE/biorxiv                                    "(the whole MAPLE repo dir: private/test/AIM CSVs, MAPLE/, utility_eval/)"
 need round0/eps$EPS/pool.csv

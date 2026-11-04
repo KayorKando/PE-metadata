@@ -26,7 +26,7 @@ echo "===== Job $SLURM_JOB_ID start @ $(date) on $(hostname), repo $(git -C "$RE
 nvidia-smi -L
 module load miniconda3/24.11.1
 eval "$(conda shell.bash hook)"
-conda activate "$ENV_NAME"
+conda activate "/work/$USER/envs/$ENV_NAME"
 export PYTHONUNBUFFERED=1
 export PE_DATA=/work/$USER/PE-metadata HF_HOME=/work/$USER/hf_cache
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1          # compute nodes have no internet

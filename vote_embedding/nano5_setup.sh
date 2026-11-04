@@ -3,7 +3,7 @@
 #   cd ~/PE-metadata && bash vote_embedding/nano5_setup.sh
 # Login node = internet, light work only. Compute nodes have NO internet, so everything the
 # job needs (pip packages, model weights, data) is fetched here, before sbatch.
-# What it does: conda env in /home (code + env), HF cache + data + logs in /work, downloads
+# What it does: conda env, pip/conda caches, HF cache, data and logs all in /work (code stays in /home), downloads
 # BiomedBERT and sentence-t5-base, then lists which data files are still missing.
 # No training, no GPU, no polling.
 set -eo pipefail
@@ -16,8 +16,11 @@ mkdir -p "$WORK/logs" "$HF_HOME" "$PE_DATA/reannotate/eps$EPS/results/biomedbert
 
 module load miniconda3/24.11.1
 eval "$(conda shell.bash hook)"
-conda env list | grep "^$ENV_NAME " >/dev/null || conda create -n "$ENV_NAME" python=3.11 -y
-conda activate "$ENV_NAME"
+# env, pip cache and conda package cache in /work (/home is only 100 GB; vLLM + torch envs are ~10-15 GB each)
+export PIP_CACHE_DIR=$WORK/.cache/pip CONDA_PKGS_DIRS=$WORK/.conda/pkgs
+ENV_PATH=$WORK/envs/$ENV_NAME
+[ -x "$ENV_PATH/bin/python" ] || conda create -p "$ENV_PATH" python=3.11 -y
+conda activate "$ENV_PATH"
 pip install torch --index-url https://download.pytorch.org/whl/cu124
 pip install transformers sentence-transformers scikit-learn pandas scipy matplotlib huggingface_hub
 
