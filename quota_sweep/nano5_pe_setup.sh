@@ -25,6 +25,8 @@ pip install vllm==0.10.1.1 transformers==4.55.4 "numpy<2.3" sentence-transformer
   matplotlib joblib faiss-cpu mauve-text "huggingface_hub>=0.34,<1.0" datasets   # hub < 1.0 for transformers 4.55.4
 # Private Evolution library (MAPLE imports pe.*): the exact commit of the lab env; --no-deps keeps the pins above
 pip install --no-deps "private-evolution @ git+https://github.com/microsoft/DPSDA.git@c109ea5e90cddfd309903e8c877bdea1565fe366"
+pip install --no-deps antlr4-python3-runtime==4.9.3 clean-fid==0.1.35 generalimport==0.5.2 omegaconf==2.3.1 \
+  PyYAML==6.0.3 tenacity==9.2.1 "fld @ git+https://github.com/marcojira/fld.git@e5a9d577383a938dc27342a7b03e8b6a808b43a0"
 pip check
 
 python - "$QWEN" <<'PY'
