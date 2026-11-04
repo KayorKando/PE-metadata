@@ -27,6 +27,31 @@ pip install vllm==0.10.1.1 transformers==4.55.4 "numpy<2.3" sentence-transformer
 pip install --no-deps "private-evolution @ git+https://github.com/microsoft/DPSDA.git@c109ea5e90cddfd309903e8c877bdea1565fe366"
 pip install --no-deps antlr4-python3-runtime==4.9.3 clean-fid==0.1.35 generalimport==0.5.2 omegaconf==2.3.1 \
   PyYAML==6.0.3 tenacity==9.2.1 "fld @ git+https://github.com/marcojira/fld.git@e5a9d577383a938dc27342a7b03e8b6a808b43a0"
+# Everything else the lab env has (pe pulls in image metrics etc.): copy its `pip freeze` to
+# $WORK/maple_freeze.txt first; only packages missing here are added, at the lab versions, without deps.
+if [ -s "$WORK/maple_freeze.txt" ]; then
+  pip freeze > "$WORK/nano5_freeze.txt"
+  python - "$WORK" <<'PY'
+import re, sys
+def names(p):
+    out = {}
+    for l in open(p):
+        l = l.strip()
+        if not l or l.startswith(("#", "-e")) or "@ file://" in l:
+            continue
+        out[re.split(r"[=@<> ]", l, 1)[0].strip().lower().replace("_", "-")] = l
+    return out
+w = sys.argv[1]
+lab, here = names(f"{w}/maple_freeze.txt"), names(f"{w}/nano5_freeze.txt")
+skip = {"torch", "torchvision", "torchaudio"}          # Nano5 keeps the CUDA build vLLM installed
+miss = [l for n, l in lab.items() if n not in here and n not in skip and not n.startswith(("nvidia-", "triton", "cuda-"))]
+open(f"{w}/missing.txt", "w").write("\n".join(miss) + "\n")
+print(len(miss), "packages from the lab env still missing")
+PY
+  [ ! -s "$WORK/missing.txt" ] || pip install --no-deps -r "$WORK/missing.txt"
+else
+  echo "no $WORK/maple_freeze.txt: on the lab cluster run  \$MAPLE_ENV/bin/pip freeze > maple_freeze.txt  and copy it there"
+fi
 pip check
 
 python - "$QWEN" <<'PY'
