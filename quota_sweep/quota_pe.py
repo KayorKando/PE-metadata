@@ -165,7 +165,7 @@ def main():
     priv = pd.read_csv(bio / "biorxiv_train_metadata.csv")
     priv = priv[priv["text"].notna()].reset_index(drop=True)
     if args.vote_emb == "t5":
-        X_priv = embed(priv["text"].astype(str).tolist(), "sentence-t5-base", 1024, batch_size=256,
+        X_priv = embed(priv["text"].astype(str).tolist(), "sentence-t5-base", 1024, batch_size=args.emb_batch,  # 256 OOMs next to vLLM on H100 80GB
                        cache_dir=str(data_root / "cache"))
     else:
         X_priv = vemb(priv["text"].astype(str).tolist())  # cached under $PE_DATA/cache
