@@ -1,16 +1,19 @@
-"""Collect a lambda sweep: <root>/<loop_annotator>[-ft]/lam<value>[_seed<s>]/metrics.jsonl
+"""Collect a lambda sweep: <root>/<loop_annotator>[-<vemb>]/lam<value>[_seed<s>]/metrics.jsonl
+<vemb> = vote-embedding family (none = sentence-t5; ft, fts<N>, ftt5 = fine-tuned, see nano5_lib.sh).
+Third-party MAUVE (quota_sweep/mauve_rescore.py) is merged in from mauve_<tag>.jsonl next to
+metrics.jsonl, as extra metrics mauve_<tag>.
 
 Writes <root>/SWEEP.md, sweep_final.csv (last round, mean / sd / n over seeds), sweep_rounds.csv,
 sweep_paired.csv (paired differences, see below), frontier.png (MAUVE vs metadata JSD at the
 last round, error bars = sd over seeds) and curves.png (per round).
 
 Baselines: "maple" = the lambda = 0 run (quota off, so loop labels do not matter); it is shown as
-the lambda = 0 point of every t5 curve. "maple-ft" is the same with the fine-tuned vote embedding
-and is shown only on the -ft curves (a t5 baseline never stands in for an ft one, or vice versa).
+the lambda = 0 point of every t5 curve. "maple-<vemb>" is the same with another vote embedding and
+is shown only on the curves of that family (a baseline never stands in for another family's).
 
 Paired differences (same seed = same privacy-noise and generation seed):
   vs lambda = 0:  metric(annotator, lambda, seed) - metric(annotator, 0, seed)
-  ft - t5:        metric(<ann>-ft, lambda, seed) - metric(<ann>, lambda, seed)
+  <vemb> - t5:    metric(<ann>-<vemb>, lambda, seed) - metric(<ann>, lambda, seed)
 reported as mean, sd, n and a 95% t-interval for the mean.
 """
 import argparse
@@ -22,11 +25,23 @@ import numpy as np
 import pandas as pd
 
 KEYS = ["mauve", "jsd_mean", "jsd_blind_mean", "jsd_other_mean"]
-BASES = {"maple": False, "maple-ft": True}      # baseline dir -> belongs to the ft family?
+
+
+def family(annotator):
+    """'classifier-ftt5' -> 'ftt5', 'maple' -> '' (sentence-t5)."""
+    return annotator.split("-", 1)[1] if "-" in annotator else ""
 
 
 def is_ft(annotator):
-    return annotator.endswith("-ft")
+    return family(annotator) != ""
+
+
+def is_base(annotator):
+    return annotator.split("-", 1)[0] == "maple"
+
+
+def extra_mauve(R):
+    return sorted(c for c in R.columns if c.startswith("mauve_")) if len(R) else []
 
 
 def load(root):
@@ -35,20 +50,24 @@ def load(root):
         m = re.match(r"lam([0-9.]+)(?:_seed(\d+))?$", f.parent.name)
         if not m:
             continue
+        extra = {}
+        for g in sorted(f.parent.glob("mauve_*.jsonl")):     # third-party MAUVE, by round
+            for line in g.read_text().splitlines():
+                e = json.loads(line)
+                extra.setdefault(e["round"], {}).update({k: v for k, v in e.items() if k.startswith("mauve_")})
         for line in f.read_text().splitlines():
             r = json.loads(line)
+            r.update(extra.get(r["round"], {}))
             r.update(annotator=f.parent.parent.name, lam=float(m.group(1)), seed=int(m.group(2) or 0),
                      done=(f.parent / "DONE").exists())
             rows.append(r)
     R = pd.DataFrame(rows)
     if R.empty:
         return R
-    parts = [R[~R.annotator.isin(list(BASES))]]
-    for base_name, ft in BASES.items():
-        if base_name not in set(R.annotator):
-            continue
+    parts = [R[~R.annotator.map(is_base)]]
+    for base_name in sorted(a for a in R.annotator.unique() if is_base(a)):
         base = R[R.annotator == base_name]
-        others = [a for a in R.annotator.unique() if a not in BASES and is_ft(a) == ft]
+        others = [a for a in R.annotator.unique() if not is_base(a) and family(a) == family(base_name)]
         parts += [base.assign(annotator=a) for a in others] or [base]
     return pd.concat(parts, ignore_index=True)
 
@@ -73,16 +92,16 @@ def paired(last, keys):
     if len(P):
         out.append(("vs lambda=0", P))
     ft = last[last.annotator.map(is_ft)].copy()
-    ft["base"] = ft.annotator.str[:-3]
+    ft["base"] = ft.annotator.str.split("-", n=1).str[0]
     Q = ft.merge(last[["annotator", "lam", "seed"] + keys].rename(columns={"annotator": "base"}),
                  on=["base", "lam", "seed"], suffixes=("", "_ref"))
-    if len(Q):
-        out.append(("ft - t5", Q))
+    for fam in sorted(Q.annotator.map(family).unique()) if len(Q) else []:
+        out.append((f"{fam} - t5", Q[Q.annotator.map(family) == fam]))
     rows = []
     for name, D in out:
         for k in keys:
             D = D.assign(d=D[k] - D[k + "_ref"])
-            for (ann, lam), g in D.groupby(["annotator", "lam"]):
+            for (ann, lam), g in D.dropna(subset=["d"]).groupby(["annotator", "lam"]):
                 n, sd = len(g), float(g.d.std()) if len(g) > 1 else float("nan")
                 rows.append(dict(comparison=name, annotator=ann, lam=lam, metric=k, mean=float(g.d.mean()), sd=sd,
                                  n=n, ci95=float(ci95(np.array(sd), np.array(n)))))
@@ -108,30 +127,32 @@ def main():
         print("no runs yet"); return
     R.to_csv(root / "sweep_rounds.csv", index=False)
     last = R.sort_values("round").groupby(["annotator", "lam", "seed"]).tail(1)
+    keys = KEYS + extra_mauve(R)
     jsd_cols = sorted(c for c in R.columns if c.startswith("jsd_") and not c.startswith("jsd_gemini")
                       and c not in KEYS)
     g = last.groupby(["annotator", "lam"])
-    F = g[KEYS + jsd_cols + ["round"]].mean().reset_index()
-    sd = g[KEYS].std().reset_index().rename(columns={k: k + "_sd" for k in KEYS})
+    F = g[keys + jsd_cols + ["round"]].mean().reset_index()
+    sd = g[keys].std().reset_index().rename(columns={k: k + "_sd" for k in keys})
     F = F.merge(sd, on=["annotator", "lam"]).merge(g.seed.count().rename("n_seeds").reset_index(), on=["annotator", "lam"])
     F = F.merge(g.done.all().reset_index(), on=["annotator", "lam"])
     F.to_csv(root / "sweep_final.csv", index=False)
-    PD = paired(last, KEYS)
+    PD = paired(last, keys)
     PD.to_csv(root / "sweep_paired.csv", index=False)
 
     parts = ["# Lambda sweep\n", f"Runs (seeds per point): {g.size().to_dict()}\n",
-             "## Last round, mean ± sd over seeds\n", md(pm_table(g[KEYS].agg(["mean", "std", "count"]), KEYS)), ""]
-    for name in ["vs lambda=0", "ft - t5"]:
-        sub = PD[PD.comparison == name] if len(PD) else PD
+             "## Last round, mean ± sd over seeds\n", md(pm_table(g[keys].agg(["mean", "std", "count"]), keys)), ""]
+    for name in (list(dict.fromkeys(PD.comparison)) if len(PD) else []):
+        sub = PD[PD.comparison == name]
         if not len(sub):
             continue
         W = sub.assign(cell=[f"{m:+.4f} ± {c:.4f} (n={n})" if c == c else f"{m:+.4f} (n={n})"
                              for m, c, n in zip(sub["mean"], sub.ci95, sub.n)])
-        W = W.pivot_table(index=["annotator", "lam"], columns="metric", values="cell", aggfunc="first")[KEYS].reset_index()
+        W = W.pivot_table(index=["annotator", "lam"], columns="metric", values="cell", aggfunc="first")
+        W = W[[k for k in keys if k in W.columns]].reset_index()
         parts += [f"## Paired difference at the last round: {name} (mean ± 95% CI over seeds)\n", md(W), ""]
     parts += ["## Per-attribute JSD at the last round (mean over seeds)\n", md(F[["annotator", "lam"] + jsd_cols]), "",
               "## Per round (mean over seeds)\n",
-              md(R.groupby(["annotator", "lam", "round"])[KEYS + ["moved", "shortfall"]].mean().reset_index()), ""]
+              md(R.groupby(["annotator", "lam", "round"])[keys + ["moved", "shortfall"]].mean().reset_index()), ""]
 
     import matplotlib
     matplotlib.use("Agg")

@@ -10,6 +10,11 @@ Model (one shared backbone for all 8 content attributes of BIORXIV_SCHEMA):
       cosine geometry the loss organises; logits are bounded by +-1/sigma = +-20.
   --loss ce (control arm, the "just use a linear classifier" idea):
       logit_a = W_a z + b_a on the un-normalised mean-pool; vote with z.
+Backbone: any HF encoder (default BiomedBERT), or a T5 encoder, e.g. --model
+sentence-transformers/sentence-t5-base (the "ft-t5" arm: fine-tune MAPLE's own vote embedding, so the
+vote and MAUVE start from the same space). For a sentence-transformers repo, its Dense layer after the
+mean-pool (sentence-t5: 768 -> 768, identity activation) is kept, so at init z equals sentence-t5's
+pre-normalisation embedding; the Dense weights are trained with the backbone and saved in heads.pt.
 Both arms: loss = sum over attributes of the mean cross-entropy over rows with a label
 (missing label -> that attribute's term skipped for that row). Same everything else.
 
@@ -54,14 +59,67 @@ MISSING = -1                          # label index for "no label" (or class uns
 
 
 # ---------------- model ----------------
-class SharedEncoder(nn.Module):
-    """Backbone + mean-pool; with normalize=True also LN (no affine) + L2 -> unit vector x."""
+def _repo_file(name, rel):
+    """Local path of file rel in a local model dir or a (cached) HF repo; raises if it is not there."""
+    if Path(name).is_dir():
+        f = Path(name) / rel
+        if not f.exists():
+            raise FileNotFoundError(f)
+        return str(f)
+    from huggingface_hub import hf_hub_download
+    return hf_hub_download(name, rel)
 
-    def __init__(self, name, normalize):
+
+def st_dense(name):
+    """The Dense layer of a sentence-transformers model (after the pooling), as nn.Linear; None if the
+    model has none (plain HF models, or no modules.json). Only identity activations are supported, and
+    the pooling, if declared, must be mean pooling (what SharedEncoder does)."""
+    try:
+        modules = json.loads(Path(_repo_file(name, "modules.json")).read_text())
+    except Exception:
+        return None
+    for m in modules:
+        if m["type"].endswith("models.Pooling"):
+            pc = json.loads(Path(_repo_file(name, f"{m['path']}/config.json")).read_text())
+            if not pc.get("pooling_mode_mean_tokens", False):
+                raise ValueError(f"{name}: only mean pooling is supported, got {pc}")
+    dense = [m for m in modules if m["type"].endswith("models.Dense")]
+    if not dense:
+        return None
+    if len(dense) > 1:
+        raise ValueError(f"{name}: more than one Dense module")
+    d = dense[0]["path"]
+    cfg = json.loads(Path(_repo_file(name, f"{d}/config.json")).read_text())
+    act = cfg.get("activation_function", "torch.nn.modules.linear.Identity")
+    if not act.endswith("Identity"):
+        raise ValueError(f"{name}: Dense activation {act} not supported")
+    try:
+        from safetensors.torch import load_file
+        sd = load_file(_repo_file(name, f"{d}/model.safetensors"))
+    except Exception:
+        sd = torch.load(_repo_file(name, f"{d}/pytorch_model.bin"), map_location="cpu", weights_only=True)
+    lin = nn.Linear(cfg["in_features"], cfg["out_features"], bias=cfg.get("bias", True))
+    lin.load_state_dict({k.split("linear.", 1)[-1]: v for k, v in sd.items()})
+    return lin
+
+
+class SharedEncoder(nn.Module):
+    """Backbone + mean-pool [+ the sentence-transformers Dense, if any]; with normalize=True also
+    LN (no affine) + L2 -> unit vector x. T5 checkpoints load as T5EncoderModel (encoder only)."""
+
+    def __init__(self, name, normalize, proj=None):
         super().__init__()
-        from transformers import AutoModel
-        self.backbone = AutoModel.from_pretrained(name)
-        self.dim = self.backbone.config.hidden_size
+        from transformers import AutoConfig, AutoModel, T5EncoderModel
+        cfg = AutoConfig.from_pretrained(name)
+        if cfg.model_type in ("t5", "mt5"):
+            self.backbone = T5EncoderModel.from_pretrained(name)
+            hidden = cfg.d_model
+        else:
+            self.backbone = AutoModel.from_pretrained(name)
+            hidden = cfg.hidden_size
+        # proj: None -> look for a sentence-transformers Dense; False -> none; nn.Linear -> use it
+        self.proj = st_dense(name) if proj is None else (proj or None)
+        self.dim = self.proj.out_features if self.proj is not None else hidden
         self.normalize = normalize
         self.ln = nn.LayerNorm(self.dim, elementwise_affine=False) if normalize else None
 
@@ -69,6 +127,8 @@ class SharedEncoder(nn.Module):
         h = self.backbone(**enc).last_hidden_state.float()
         m = enc["attention_mask"].unsqueeze(-1).float()
         z = (h * m).sum(1) / m.sum(1).clamp(min=1.0)
+        if self.proj is not None:
+            z = F.linear(z, self.proj.weight.float(), None if self.proj.bias is None else self.proj.bias.float())
         if self.normalize:
             z = F.normalize(self.ln(z), dim=-1)
         return z
@@ -104,8 +164,8 @@ class LinearHeads(nn.Module):
         return {a: self.W[a](z) for a in self.attrs}
 
 
-def make_model(name, loss, n_classes, sigma=SIGMA):
-    enc = SharedEncoder(name, normalize=(loss == "normsoftmax"))
+def make_model(name, loss, n_classes, sigma=SIGMA, proj=None):
+    enc = SharedEncoder(name, normalize=(loss == "normsoftmax"), proj=proj)
     heads = ProxyHeads(enc.dim, n_classes, sigma) if loss == "normsoftmax" else LinearHeads(enc.dim, n_classes)
     return enc, heads
 
@@ -263,7 +323,11 @@ def save(path, enc_model, heads, tok, classes, config, hist=None):
     (path / "backbone").mkdir(parents=True, exist_ok=True)
     enc_model.backbone.save_pretrained(path / "backbone")
     tok.save_pretrained(path / "backbone")
-    torch.save({"heads": _cpu_state(heads), "classes": classes}, path / "heads.pt")
+    ck = {"heads": _cpu_state(heads), "classes": classes}
+    if enc_model.proj is not None:  # sentence-transformers Dense (trained with the backbone)
+        ck["proj"] = _cpu_state(enc_model.proj)
+        ck["proj_shape"] = [enc_model.proj.in_features, enc_model.proj.out_features, enc_model.proj.bias is not None]
+    torch.save(ck, path / "heads.pt")
     (path / "config.json").write_text(json.dumps(config, indent=2))
     if hist is not None:
         (path / "train_log.json").write_text(json.dumps(hist, indent=2))
@@ -275,8 +339,13 @@ def load(path, device="cpu"):
     cfg = json.loads((path / "config.json").read_text())
     ck = torch.load(path / "heads.pt", map_location="cpu", weights_only=False)
     classes = ck["classes"]
+    proj = False
+    if "proj" in ck:
+        i, o, b = ck["proj_shape"]
+        proj = nn.Linear(i, o, bias=b)
+        proj.load_state_dict(ck["proj"])
     enc_model, heads = make_model(str(path / "backbone"), cfg["loss"], {a: len(c) for a, c in classes.items()},
-                                  cfg.get("sigma", SIGMA))
+                                  cfg.get("sigma", SIGMA), proj=proj)
     heads.load_state_dict(ck["heads"])
     return enc_model.to(device).eval(), heads.to(device).eval(), classes, cfg
 
@@ -292,7 +361,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--pool_qwen", required=True, help="annotate_qwen.py output on the round-0 pool")
     p.add_argument("--loss", default="normsoftmax", choices=LOSSES)
-    p.add_argument("--model", default=HF_MODELS["biomedbert"], help="HF backbone name or local path")
+    p.add_argument("--model", default=HF_MODELS["biomedbert"],
+                   help="HF backbone name or local path; sentence-transformers/sentence-t5-base for the ft-t5 arm")
     p.add_argument("--out", default=None, help="default $PE_DATA/vote_embedding/eps<eps>/<loss>")
     p.add_argument("--eps", default="4.0")
     p.add_argument("--sigma", type=float, default=SIGMA)

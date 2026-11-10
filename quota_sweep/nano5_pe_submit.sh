@@ -10,7 +10,8 @@
 # GROUP_BY: run (1 run per job), lam (1 job per vote embedding x lambda), all (1 job per vote embedding).
 # Other settings: ANNOTATOR (classifier), EPS (4.0), TIME per job (02:00:00; a run took ~45 min on the lab GPU,
 # runs of a job go in parallel), CPUS_PER_RUN (8), MEM_PER_RUN (64, GB), PARTITION (normal), EXTRA (quota_pe.py flags).
-# Runs land in $PE_DATA/quota_sweep/eps$EPS/<annotator>[-ft]/lam*/, lambda = 0 in maple[-ft]/. Finished runs
+# VOTE_EMBS: t5, ft, fts<N> (ft embedder seed N), ftt5 (fine-tuned sentence-t5); see nano5_lib.sh.
+# Runs land in $PE_DATA/quota_sweep/eps$EPS/<annotator>[-<vemb>]/lam*/, lambda = 0 in maple[-<vemb>]/. Finished runs
 # (DONE) are left out when the jobs are built, unfinished ones resume after their last round: after a
 # TIMEOUT or a failure, rerun the same command and only the missing runs are submitted.
 set -eo pipefail
@@ -31,11 +32,16 @@ case $GROUP_BY in run|lam|all) ;; *) echo "GROUP_BY must be run, lam or all"; ex
 for f in round0/eps$EPS/pool.csv quota_sweep/test_ref_qwen.csv MAPLE/biorxiv/biorxiv_train_metadata.csv; do
   [ -s "$PE_DATA/$f" ] || { echo "missing $PE_DATA/$f (see quota_sweep/nano5_pe_setup.sh)"; exit 1; }
 done
-[ "$ANNOTATOR" != classifier ] || [ -s "$PE_DATA/reannotate/eps$EPS/best_annotator_nano5.json" ] || \
+nonzero=$(awk -v ls="$LAMS" 'BEGIN { n = split(ls, a, " "); for (i = 1; i <= n; i++) if (a[i] + 0 != 0) { print 1; exit } }')
+[ "$ANNOTATOR" != classifier ] || [ -z "$nonzero" ] || [ -s "$PE_DATA/reannotate/eps$EPS/best_annotator_nano5.json" ] || \
   { echo "missing best_annotator_nano5.json: rerun quota_sweep/nano5_pe_setup.sh after copying the spec"; exit 1; }
-[[ " $VOTE_EMBS " != *" ft "* ]] || [ -n "$AFTER" ] || [ -s "$PE_DATA/vote_embedding/eps$EPS/normsoftmax/heads.pt" ] || \
-  { echo "no ft embedder yet: sbatch vote_embedding/nano5_check.sbatch first, then pass its id as AFTER=<jobid>"; exit 1; }
 source quota_sweep/nano5_lib.sh
+for v in $VOTE_EMBS; do
+  vemb_dir "$v" || exit 1
+  [ -z "$VEMB_DIR" ] || [ -n "$AFTER" ] || [ -s "$PE_DATA/vote_embedding/eps$EPS/$VEMB_DIR/heads.pt" ] || \
+    { echo "no $v embedder yet ($PE_DATA/vote_embedding/eps$EPS/$VEMB_DIR): train it first" \
+           "(vote_embedding/nano5_train.sbatch), then pass its job id as AFTER=<jobid>"; exit 1; }
+done
 ROOT=$PE_DATA/quota_sweep/eps$EPS
 
 # build the jobs: key -> "vemb seed lam;vemb seed lam;..." (finished runs left out)

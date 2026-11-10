@@ -44,7 +44,8 @@ for i in "${!runs[@]}"; do
   out=$ROOT/$RUN_DIR
   if [ -f "$out/DONE" ]; then echo "[$(date '+%T')] skip $RUN_DIR (done)"; continue; fi
   vflags=(); aflags=()
-  [ "$vemb" != ft ] || vflags=(--vote_emb ft --vote_emb_path "$PE_DATA/vote_embedding/eps$EPS/normsoftmax")
+  vemb_dir "$vemb"
+  [ -z "$VEMB_DIR" ] || vflags=(--vote_emb ft --vote_emb_path "$PE_DATA/vote_embedding/eps$EPS/$VEMB_DIR")
   [ "$RUN_ANN" != classifier ] || aflags=(--classifier_spec "$PE_DATA/reannotate/eps$EPS/best_annotator_nano5.json")
   log=$LOGDIR/pe-${SLURM_JOB_ID:-x}-${RUN_DIR//\//_}.log
   echo "[$(date '+%T')] start $RUN_DIR on GPU ${gpus[$i]} -> $log"
