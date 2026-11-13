@@ -30,6 +30,8 @@ PE_DATA=${NANO5_DATA:-/work/$USER/PE-metadata}
 [ -f quota_sweep/nano5_pe.sbatch ] || { echo "run from the repo root"; exit 1; }
 case $GROUP_BY in run|lam|all) ;; *) echo "GROUP_BY must be run, lam or all"; exit 1;; esac
 for f in round0/eps$EPS/pool.csv quota_sweep/test_ref_qwen.csv MAPLE/biorxiv/biorxiv_train_metadata.csv; do
+  # with AFTER, the round-0 pool may still be made by that job (nano5_prep_eps.sbatch)
+  [ -n "$AFTER" ] && [ "$f" = "round0/eps$EPS/pool.csv" ] && continue
   [ -s "$PE_DATA/$f" ] || { echo "missing $PE_DATA/$f (see quota_sweep/nano5_pe_setup.sh)"; exit 1; }
 done
 nonzero=$(awk -v ls="$LAMS" 'BEGIN { n = split(ls, a, " "); for (i = 1; i <= n; i++) if (a[i] + 0 != 0) { print 1; exit } }')

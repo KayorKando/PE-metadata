@@ -226,3 +226,16 @@ def test_gpt2_last_token_features_ignore_padding(tmp_path):
     X = f(texts)
     single = np.concatenate([f([t]) for t in texts])
     assert np.allclose(X, single, atol=1e-5)
+
+
+def test_submit_with_after_allows_missing_pool(tmp_path):
+    """New eps: the round-0 pool is made by the prep job given as AFTER."""
+    b, log = stubs(tmp_path)
+    data(tmp_path / "work")
+    (tmp_path / "work/round0/eps4.0/pool.csv").unlink()
+    r = subprocess.run(["bash", "quota_sweep/nano5_pe_submit.sh"], cwd=REPO, capture_output=True, text=True,
+                       env=env_for(tmp_path, b, VOTE_EMBS="t5", LAMS="0"))
+    assert r.returncode != 0 and "pool.csv" in r.stdout
+    submit(env_for(tmp_path, b, VOTE_EMBS="t5 ft", LAMS="0", SEEDS="0 1", GROUP_BY="lam", AFTER="555"))
+    calls = sbatch_calls(log)
+    assert len(calls) == 2 and all("--dependency=afterok:555" in c for c in calls)
