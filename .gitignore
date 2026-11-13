@@ -5,3 +5,4 @@ results/
 .DS_Store
 .venv/
 _pe_code.tgz
+.code_snapshot.tgz
