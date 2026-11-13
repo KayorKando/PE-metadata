@@ -5,18 +5,19 @@
 #SBATCH --time=02:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:4
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=128G
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
 #SBATCH --output=/work/%u/logs/%x-%j.out
 # Third-party MAUVE (quota_sweep/mauve_rescore.py) for every finished round of every PE run, one shard of the
 # run dirs per GPU, in parallel. Setup once on the login node: bash quota_sweep/nano5_mauve_setup.sh
 # From the repo root:
-#   sbatch quota_sweep/nano5_mauve.sbatch                            # gpt2-large, eps 4.0, all runs, all rounds
+#   sbatch --gres=gpu:4 --cpus-per-task=32 --mem=192G quota_sweep/nano5_mauve.sbatch   # gpt2-large, eps 4.0, all runs, 4 shards
 #   MODEL=sentence-t5-base RUNS_GLOB="maple/lam0*" sbatch ...         # sanity: must reproduce the stored mauve
 #   sbatch --dependency=afterok:<pe job> quota_sweep/nano5_mauve.sbatch   # after new PE runs (resumable)
 # Settings: EPS (4.0), MODEL (gpt2-large), RUNS_GLOB (*/lam*), LAST_ONLY (empty = all rounds).
-# The number of shards = number of GPUs of the job (--gres). Then: python quota_sweep/summarize.py --root ...
+# The number of shards = number of GPUs of the job (--gres). Nano5 allows at most 12 CPUs per GPU:
+# change --gres, --cpus-per-task and --mem together (default 1 GPU / 8 CPUs). Then: python quota_sweep/summarize.py --root ...
 set -eo pipefail
 EPS=${EPS:-4.0}
 MODEL=${MODEL:-gpt2-large}
