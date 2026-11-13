@@ -239,3 +239,12 @@ def test_submit_with_after_allows_missing_pool(tmp_path):
     submit(env_for(tmp_path, b, VOTE_EMBS="t5 ft", LAMS="0", SEEDS="0 1", GROUP_BY="lam", AFTER="555"))
     calls = sbatch_calls(log)
     assert len(calls) == 2 and all("--dependency=afterok:555" in c for c in calls)
+
+
+def test_fp16_checkpoint_loads_as_fp32(tmp_path):
+    """sentence-t5-base is stored in fp16; the backbone must train with fp32 weights (bf16 only via autocast)."""
+    from transformers import T5EncoderModel
+    d = make_tiny_st_t5(tmp_path / "half")
+    T5EncoderModel.from_pretrained(d).half().save_pretrained(d)
+    enc, _ = make_model(d, "normsoftmax", K)
+    assert all(p.dtype == torch.float32 for p in enc.parameters())

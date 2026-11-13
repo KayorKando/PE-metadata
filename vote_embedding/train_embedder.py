@@ -111,11 +111,14 @@ class SharedEncoder(nn.Module):
         super().__init__()
         from transformers import AutoConfig, AutoModel, T5EncoderModel
         cfg = AutoConfig.from_pretrained(name)
+        # .float(): fp32 master weights under bf16 autocast. Newer transformers load the checkpoint's own
+        # dtype (sentence-t5-base is stored in fp16); T5's SDPA path then fails with "value cannot be
+        # converted to type at::Half without overflow" (Nano5 job 467256).
         if cfg.model_type in ("t5", "mt5"):
-            self.backbone = T5EncoderModel.from_pretrained(name)
+            self.backbone = T5EncoderModel.from_pretrained(name).float()
             hidden = cfg.d_model
         else:
-            self.backbone = AutoModel.from_pretrained(name)
+            self.backbone = AutoModel.from_pretrained(name).float()
             hidden = cfg.hidden_size
         # proj: None -> look for a sentence-transformers Dense; False -> none; nn.Linear -> use it
         self.proj = st_dense(name) if proj is None else (proj or None)
