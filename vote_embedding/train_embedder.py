@@ -115,7 +115,8 @@ class SharedEncoder(nn.Module):
         # dtype (sentence-t5-base is stored in fp16); T5's SDPA path then fails with "value cannot be
         # converted to type at::Half without overflow" (Nano5 job 467256).
         if cfg.model_type in ("t5", "mt5"):
-            self.backbone = T5EncoderModel.from_pretrained(name).float()
+            # eager attention: T5's SDPA path builds its position-bias mask in a way that broke under autocast
+            self.backbone = T5EncoderModel.from_pretrained(name, attn_implementation="eager").float()
             hidden = cfg.d_model
         else:
             self.backbone = AutoModel.from_pretrained(name).float()
