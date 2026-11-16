@@ -4,6 +4,7 @@
 #   ft        BiomedBERT fine-tuned with normsoftmax, embedder seed 0     -> vote_embedding/eps<eps>/normsoftmax
 #   fts<N>    the same, embedder trained with seed N (split + init)        -> .../normsoftmax-seed<N>
 #   ftt5      sentence-t5 fine-tuned with normsoftmax (same recipe)        -> .../normsoftmax-t5
+#   ftt5_lr<X> the same with learning rate X (e.g. ftt5_lr1e-4)           -> .../normsoftmax-t5-lr<X>
 # run_dir <vote_emb> <seed> <lam>  -> sets RUN_DIR (relative to the sweep root) and RUN_ANN (loop annotator).
 # lambda = 0: quota off, loop labels unused -> the shared MAPLE baseline maple/ (t5) or maple-<vemb>/ with
 # inherited labels; summarize.py shows it as the lambda = 0 point of every curve of that embedding.
@@ -21,7 +22,8 @@ vemb_dir() {
     t5) VEMB_DIR= ;;
     ft) VEMB_DIR=normsoftmax ;;
     ftt5) VEMB_DIR=normsoftmax-t5 ;;
+    ftt5_lr*) VEMB_DIR=normsoftmax-t5-lr${1#ftt5_lr} ;;
     fts[0-9]*) VEMB_DIR=normsoftmax-seed${1#fts} ;;
-    *) echo "unknown vote embedding '$1' (t5, ft, fts<N>, ftt5)" >&2; return 1 ;;
+    *) echo "unknown vote embedding '$1' (t5, ft, fts<N>, ftt5, ftt5_lr<X>)" >&2; return 1 ;;
   esac
 }

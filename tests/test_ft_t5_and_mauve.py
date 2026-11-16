@@ -289,3 +289,31 @@ def test_summarize_pairs_family_without_own_t5_dir_and_dedups(tmp_path):
     P = pd.read_csv(tmp_path / "sweep_paired.csv").set_index(["comparison", "metric"])
     assert abs(P.loc[("ftt5 - t5", "jsd_blind_mean"), "mean"] + 0.15) < 1e-9
     assert P.loc[("ftt5 - t5", "jsd_blind_mean"), "n"] == 3
+
+
+def test_length_matched_subsample():
+    from quota_sweep.mauve_rescore import length_matched_idx, word_bins
+    rng = np.random.default_rng(0)
+    p = [" ".join(["w"] * int(n)) for n in rng.choice([100, 200, 300], 600, p=[0.5, 0.3, 0.2])]
+    q = [" ".join(["w"] * int(n)) for n in rng.choice([100, 200, 300, 600], 900, p=[0.1, 0.2, 0.3, 0.4])]
+    idx, cov = length_matched_idx(q, p)
+    assert cov == 1.0 and len(set(idx)) == len(idx)
+    qb, pb = word_bins(np.array(q)[idx]), word_bins(p)
+    for b in (2, 4, 6):
+        assert abs(np.mean(qb == b) - np.mean(pb == b)) < 0.01
+    assert not np.any(qb == 12)                                    # 600-word texts are not in the test set
+    assert 150 < len(idx) < 260          # limited by the 100-word bin: ~90 rows for a 50 % target -> ~180 + rest
+
+
+def test_ftt5_lr_variant_paths(tmp_path):
+    b, log = stubs(tmp_path)
+    work = tmp_path / "work"
+    data(work)
+    (work / "vote_embedding/eps4.0/normsoftmax-t5-lr1e-4").mkdir(parents=True)
+    (work / "vote_embedding/eps4.0/normsoftmax-t5-lr1e-4/heads.pt").write_text("x")
+    e = env_for(tmp_path, b, GROUP_BY="lam", VOTE_EMBS="ftt5_lr1e-4", LAMS="0", SEEDS="0 1")
+    submit(e)
+    runs = run_job(e, "ftt5_lr1e-4 0 0;ftt5_lr1e-4 1 0", "0,1", log, tmp_path)
+    assert sorted(runs) == ["maple-ftt5_lr1e-4/lam0", "maple-ftt5_lr1e-4/lam0_seed1"]
+    for _, (_, py) in runs.items():
+        assert py[py.index("--vote_emb_path") + 1].endswith("normsoftmax-t5-lr1e-4")

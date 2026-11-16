@@ -12,6 +12,7 @@
 # Train extra normsoftmax vote embedders on the round-0 pool (Qwen labels), serially on one H100.
 # Same recipe as the main ft embedder (train_embedder.py defaults); only the backbone or the seed changes:
 #   ftt5     backbone sentence-transformers/sentence-t5-base (MAPLE's own vote embedding, fine-tuned)
+#   ftt5_lr<X>  the same with backbone learning rate X (heads 10x), e.g. ftt5_lr1e-4
 #   fts<N>   BiomedBERT, --seed N (changes the 70/15/15 split and the init)
 #   ft       BiomedBERT, seed 0 (the main embedder; normally already trained by nano5_check.sbatch)
 # From the repo root:   VARIANTS="ftt5 fts1 fts2" sbatch vote_embedding/nano5_train.sbatch
@@ -42,6 +43,7 @@ for v in $VARIANTS; do
   args=()
   case $v in
     ftt5) args=(--model sentence-transformers/sentence-t5-base) ;;
+    ftt5_lr*) args=(--model sentence-transformers/sentence-t5-base --lr "${v#ftt5_lr}") ;;
     fts*) args=(--seed "${v#fts}") ;;
   esac
   echo "[$(date '+%T')] training $v -> $out (${args[*]})"
