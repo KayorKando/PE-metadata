@@ -265,3 +265,27 @@ def test_ftembedder_falls_back_to_base_tokenizer(t5dir, tmp_path):
     c = json.loads(cfgf.read_text()); c["extra_special_tokens"] = ["<extra_id_0>"]; cfgf.write_text(json.dumps(c))
     emb = FTEmbedder(path, batch=4, device="cpu", log_overflow=False)
     assert np.allclose(emb(texts), X0, atol=1e-6)
+
+
+def test_summarize_pairs_family_without_own_t5_dir_and_dedups(tmp_path):
+    """maple-ftt5 next to classifier/ + maple/: paired against maple (shown as classifier lambda = 0);
+    a round logged twice keeps its last line."""
+    def run(ann, lam, seed, blind, dup=False):
+        d = tmp_path / ann / (f"lam{lam}" + ("" if seed == 0 else f"_seed{seed}"))
+        d.mkdir(parents=True)
+        rows = [dict(round=t, mauve=0.7, jsd_mean=0.1, jsd_blind_mean=blind, jsd_other_mean=0.05, moved=0,
+                     shortfall=0) for t in range(2)]
+        if dup:
+            rows.insert(1, dict(rows[1], jsd_blind_mean=9.0))       # stale duplicate of round 1, written first
+        (d / "metrics.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
+    for s in range(3):
+        run("maple", 0, s, 0.30 + 0.01 * s)
+        run("classifier", 0.5, s, 0.20)
+        run("maple-ftt5", 0, s, 0.15 + 0.01 * s, dup=True)
+    r = subprocess.run([sys.executable, str(REPO / "quota_sweep" / "summarize.py"), "--root", str(tmp_path)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "duplicated rounds" in r.stdout
+    P = pd.read_csv(tmp_path / "sweep_paired.csv").set_index(["comparison", "metric"])
+    assert abs(P.loc[("ftt5 - t5", "jsd_blind_mean"), "mean"] + 0.15) < 1e-9
+    assert P.loc[("ftt5 - t5", "jsd_blind_mean"), "n"] == 3

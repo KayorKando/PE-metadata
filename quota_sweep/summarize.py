@@ -64,6 +64,12 @@ def load(root):
     R = pd.DataFrame(rows)
     if R.empty:
         return R
+    # a round logged twice (two jobs ran the same run dir at once): keep the last line, warn
+    dup = R.duplicated(["annotator", "lam", "seed", "round"], keep="last")
+    if dup.any():
+        bad = sorted(set(R[dup].apply(lambda r: f"{r.annotator}/lam{r.lam:g} seed {r.seed}", axis=1)))
+        print(f"WARNING: duplicated rounds (two writers?) in {bad}; keeping the last line of each round")
+        R = R[~dup]
     parts = [R[~R.annotator.map(is_base)]]
     for base_name in sorted(a for a in R.annotator.unique() if is_base(a)):
         base = R[R.annotator == base_name]
@@ -93,8 +99,15 @@ def paired(last, keys):
         out.append(("vs lambda=0", P))
     ft = last[last.annotator.map(is_ft)].copy()
     ft["base"] = ft.annotator.str.split("-", n=1).str[0]
-    Q = ft.merge(last[["annotator", "lam", "seed"] + keys].rename(columns={"annotator": "base"}),
-                 on=["base", "lam", "seed"], suffixes=("", "_ref"))
+    # reference = the t5 run of the same loop annotator, lambda and seed; when that annotator has no t5 dir of
+    # its own (e.g. maple-ftt5: its t5 baseline maple/ is shown as classifier lambda = 0), any t5 copy will do
+    t5 = last[~last.annotator.map(is_ft)]
+    exact = t5[["annotator", "lam", "seed"] + keys].rename(columns={"annotator": "base"})
+    anyt5 = t5.drop_duplicates(["lam", "seed"])[["lam", "seed"] + keys]
+    ft["base"] = ft["base"].where(ft["base"].isin(set(t5.annotator)), "__any__")
+    Q = pd.concat([ft[ft.base != "__any__"].merge(exact, on=["base", "lam", "seed"], suffixes=("", "_ref")),
+                   ft[ft.base == "__any__"].merge(anyt5, on=["lam", "seed"], suffixes=("", "_ref"))],
+                  ignore_index=True)
     for fam in sorted(Q.annotator.map(family).unique()) if len(Q) else []:
         out.append((f"{fam} - t5", Q[Q.annotator.map(family) == fam]))
     rows = []
