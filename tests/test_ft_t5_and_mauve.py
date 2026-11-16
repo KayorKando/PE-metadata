@@ -248,3 +248,20 @@ def test_fp16_checkpoint_loads_as_fp32(tmp_path):
     T5EncoderModel.from_pretrained(d).half().save_pretrained(d)
     enc, _ = make_model(d, "normsoftmax", K)
     assert all(p.dtype == torch.float32 for p in enc.parameters())
+
+
+def test_ftembedder_falls_back_to_base_tokenizer(t5dir, tmp_path):
+    """A tokenizer config written by a newer transformers ('extra_special_tokens' as a list) must not stop the
+    vote embedder: it loads the base model's tokenizer instead and gives the same embeddings."""
+    from vote_embedding.embedder import FTEmbedder
+    enc, heads = make_model(t5dir, "normsoftmax", K)
+    tk = tk_for(t5dir)
+    path = tmp_path / "emb"
+    save(path, enc, heads, tk.tok, {a: [str(i) for i in range(3)] for a in K},
+         {"loss": "normsoftmax", "sigma": 0.05, "max_len": 64, "base_model": t5dir})
+    texts = random_texts(5, 7)
+    X0 = FTEmbedder(path, batch=4, device="cpu", log_overflow=False)(texts)
+    cfgf = path / "backbone" / "tokenizer_config.json"
+    c = json.loads(cfgf.read_text()); c["extra_special_tokens"] = ["<extra_id_0>"]; cfgf.write_text(json.dumps(c))
+    emb = FTEmbedder(path, batch=4, device="cpu", log_overflow=False)
+    assert np.allclose(emb(texts), X0, atol=1e-6)

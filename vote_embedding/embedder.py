@@ -29,7 +29,17 @@ class FTEmbedder:
         self.enc, self.heads, classes, self.cfg = load(self.path, self.device)
         self.classes = {a: np.array(c) for a, c in classes.items()}
         self.max_len = int(self.cfg.get("max_len", 512))
-        self.tk = FineTuned(str(self.path / "backbone"), 0, 1, 0.0, batch, self.max_len, self.device)
+        try:
+            self.tk = FineTuned(str(self.path / "backbone"), 0, 1, 0.0, batch, self.max_len, self.device)
+        except Exception as e:
+            # The saved tokenizer config can come from a newer transformers than the one loading it (trained in
+            # the pe-metadata env, used in the maple env: 'extra_special_tokens' saved as a list breaks
+            # transformers 4.55, Nano5 job 471545). Training never changes the tokenizer, so load the base model's.
+            base = self.cfg.get("base_model")
+            if not base:
+                raise
+            print(f"[FTEmbedder] saved tokenizer failed to load ({type(e).__name__}: {e}); using {base}'s", flush=True)
+            self.tk = FineTuned(base, 0, 1, 0.0, batch, self.max_len, self.device)
         self.dim = self.enc.dim
         fp = hashlib.sha1((self.path / "heads.pt").read_bytes() + (self.path / "config.json").read_bytes())
         self.name = f"ft-{self.cfg['loss']}-{fp.hexdigest()[:8]}"

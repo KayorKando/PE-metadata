@@ -15,7 +15,7 @@
 #   sbatch --gres=gpu:4 --cpus-per-task=32 --mem=192G quota_sweep/nano5_mauve.sbatch   # gpt2-large, eps 4.0, all runs, 4 shards
 #   MODEL=sentence-t5-base RUNS_GLOB="maple/lam0*" sbatch ...         # sanity: must reproduce the stored mauve
 #   sbatch --dependency=afterok:<pe job> quota_sweep/nano5_mauve.sbatch   # after new PE runs (resumable)
-# Settings: EPS (4.0), MODEL (gpt2-large), RUNS_GLOB (*/lam*), LAST_ONLY (empty = all rounds).
+# Settings: EPS (4.0), MODEL (gpt2-large), RUNS_GLOB (*/lam*), LAST_ONLY (empty = all rounds), MAUVE_ROOT (run tree).
 # The number of shards = number of GPUs of the job (--gres). Nano5 allows at most 12 CPUs per GPU:
 # change --gres, --cpus-per-task and --mem together (default 1 GPU / 8 CPUs). Then: python quota_sweep/summarize.py --root ...
 set -eo pipefail
@@ -27,7 +27,7 @@ REPO=${SLURM_SUBMIT_DIR:-$PWD}
 cd "$REPO"
 export PE_DATA=${NANO5_DATA:-/work/$USER/PE-metadata} HF_HOME=/work/$USER/hf_cache PYTHONUNBUFFERED=1
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-ROOT=$PE_DATA/quota_sweep/eps$EPS
+ROOT=${MAUVE_ROOT:-$PE_DATA/quota_sweep/eps$EPS}       # MAUVE_ROOT: other run trees, e.g. $PE_DATA/augpe/eps4.0
 LOGDIR=/work/$USER/logs; mkdir -p "$LOGDIR"
 IFS=',' read -ra gpus <<< "${CUDA_VISIBLE_DEVICES:-0}"
 n=${#gpus[@]}
