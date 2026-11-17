@@ -209,6 +209,17 @@ def test_mauve_rescore(tmp_path, monkeypatch):
     assert [l["round"] for l in lines] == [0, 1] and all(15.9 < l["mauve_gpt2-tiny"] < 17 for l in lines)
     r = subprocess.run(cmd, capture_output=True, text=True)                 # resumable: nothing left
     assert "0 rounds to score" in r.stdout and len((run / "mauve_gpt2-tiny.jsonl").read_text().splitlines()) == 2
+    # Aug-PE layout: run dirs are seed<s> directly under the root (--runs "seed*")
+    arun = tmp_path / "augpe" / "seed0"
+    arun.mkdir(parents=True)
+    for t in range(2):
+        pd.DataFrame({"text": random_texts(8, 20 + t)}).to_csv(arun / f"round_{t}.csv", index=False)
+    (arun / "metrics.jsonl").write_text("\n".join(json.dumps({"round": t}) for t in range(2)))
+    cmd[cmd.index("--root") + 1] = str(tmp_path / "augpe")
+    r = subprocess.run(cmd + ["--runs", "seed*"], capture_output=True, text=True,
+                       env={**__import__("os").environ, "CUDA_VISIBLE_DEVICES": ""})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert [json.loads(l)["round"] for l in (arun / "mauve_gpt2-tiny.jsonl").read_text().splitlines()] == [0, 1]
 
 
 def test_gpt2_last_token_features_ignore_padding(tmp_path):

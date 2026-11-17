@@ -256,3 +256,18 @@ def test_submit_nothing_left_and_missing_input(tmp_path):
     (tmp_path / "work" / "MAPLE" / "biorxiv" / "MAPLE" / "PE.py").unlink()
     r = subprocess.run(["bash", "augpe/nano5_augpe_submit.sh"], cwd=REPO, env=env, capture_output=True, text=True)
     assert r.returncode != 0 and "PE.py" in r.stdout and not log.exists()
+
+
+def test_mauve_rescore_finds_augpe_run_dirs(tmp_path):
+    """mauve_rescore.py must see seed<s> run dirs (Nano5 job 475102 scored nothing and still reported success)."""
+    from quota_sweep.mauve_rescore import run_dirs
+    for d in ("augpe/seed0", "augpe/seed3", "augpe/notes", "sweep/maple/lam0", "sweep/maple-ft/lam0.5_seed2",
+              "sweep/maple/check"):
+        (tmp_path / d).mkdir(parents=True)
+        (tmp_path / d / "round_0.csv").write_text("text\na\n")
+    assert sorted(d.name for d in run_dirs(tmp_path / "augpe", "seed*")) == ["seed0", "seed3"]
+    assert sorted(d.name for d in run_dirs(tmp_path / "sweep", "*/lam*")) == ["lam0", "lam0.5_seed2"]
+    cmd = [sys.executable, str(REPO / "quota_sweep" / "mauve_rescore.py"), "--root", str(tmp_path / "augpe"),
+           "--maple_dir", str(tmp_path), "--test_ref", str(tmp_path / "none.csv"), "--runs", "*/lam*"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    assert r.returncode != 0 and "no run dirs" in r.stderr

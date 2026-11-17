@@ -133,8 +133,9 @@ def length_matched_idx(q_texts, p_texts, seed=0, width=50):
 
 
 def run_dirs(root, pattern):
+    """Run dirs with round files: lam<x>[_seed<s>] (quota_pe.py) or seed<s> (augpe_pe.py)."""
     ds = sorted({f.parent for f in Path(root).glob(f"{pattern}/round_*.csv")})
-    return [d for d in ds if re.match(r"lam[0-9.]+(_seed\d+)?$", d.name)]
+    return [d for d in ds if re.match(r"(lam[0-9.]+(_seed\d+)?|seed\d+)$", d.name)]
 
 
 def main():
@@ -151,13 +152,16 @@ def main():
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--num_shards", type=int, default=1)
     args = p.parse_args()
+    all_dirs = run_dirs(args.root, args.runs)
+    if not all_dirs:                     # a job that scores nothing must not look like a success
+        sys.exit(f"no run dirs with round_*.csv match {args.root}/{args.runs}")
     from quota_sweep.quota_pe import load_mauve
     compute_mauve = load_mauve(args.maple_dir)
     tag = tag_of(args.model) + ("-lenmatch" if args.length_match else "")
     key = f"mauve_{tag}"
     cache_dir = Path(os.environ.get("PE_DATA", ".")) / "cache"
 
-    dirs = run_dirs(args.root, args.runs)[args.shard::args.num_shards]
+    dirs = all_dirs[args.shard::args.num_shards]
     todo = []
     for d in dirs:
         out = d / f"{key}.jsonl"
