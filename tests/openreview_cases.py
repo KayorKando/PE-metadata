@@ -100,6 +100,8 @@ def make_maple(root):
 
     priv = with_ids(meta(rng, 160, PAIRS[:8])).assign(text=[text(rng) for _ in range(160)])
     priv = priv.rename(columns={"word_count": "word count"})          # as MAPLE's train CSV
+    priv.loc[priv.index[:6], "primary_strength"] = np.nan                 # MAPLE's private labels have NaN here
+    priv.loc[priv.index[3:12], "primary_weakness"] = np.nan
     priv.to_csv(d / "train_dataset_with_metadata_v4.csv", index=False)
     for name, n in [("val", 60), ("test", 60)]:
         v = with_ids(meta(rng, n, PAIRS[:8])).assign(text=[text(rng) for _ in range(n)])
@@ -372,3 +374,31 @@ def test_embedder_trains_on_the_openreview_schema(tmp_path, monkeypatch):
     train_main()
     cfg = json.loads((out / "config.json").read_text())
     assert cfg["attributes"] == CONTENT and (out / "heads.pt").exists()
+
+
+def test_eps_inf_with_nan_metadata(env):
+    """eps = inf uses the private labels as metadata; they have NaN (pandas 3: astype(str) keeps NaN, which broke the
+    embedder's prompt groups, Nano5 job 482577). Pool -> PE round -> embedder training must all go through."""
+    tmp, maple, mp = env
+    import gen_round0
+    out = tmp / "round0" / "epsinf"
+    main_with(mp, gen_round0.main, ["--maple_dir", maple, "--eps", "inf", "--num_syn", 40, "--L_random", 2, "--out", out])
+    main_with(mp, gen_round0.main, ["--maple_dir", maple, "--eps", "inf", "--merge", "--out", out])
+    pool = pd.read_csv(out / "pool.csv")
+    assert pool["primary_strength"].isna().any() or pool["primary_weakness"].isna().any()
+    run_pe(mp, maple, out / "pool.csv", tmp, tmp / "prep", "--lam", 0, "--prep_only")
+    run_pe(mp, maple, out / "pool.csv", tmp, tmp / "inf", "--lam", 0.5, "--loop_annotator", "inherited",
+           "--blind", "word_count", "primary_weakness", "primary_strength")
+    r = pd.read_csv(tmp / "inf" / "round_1.csv")
+    assert len(r) == 40 and r["loop_primary_weakness"].isin(SCHEMA["primary_weakness"]).all()
+    from tests.tiny_bert import make_tiny_bert
+    from vote_embedding.train_embedder import main as train_main
+    rng = np.random.default_rng(1)
+    for a in CONTENT:
+        pool[f"map_{a}"] = rng.choice(SCHEMA[a][:2], len(pool))
+    pool.to_csv(tmp / "pool_qwen.csv", index=False)
+    bert = make_tiny_bert(tmp / "bert", hidden=32, heads=2)
+    mp.setattr(sys, "argv", ["x", "--pool_qwen", str(tmp / "pool_qwen.csv"), "--model", bert, "--epochs", "1",
+                             "--max_len", "32", "--out", str(tmp / "emb")])
+    train_main()
+    assert (tmp / "emb" / "heads.pt").exists()

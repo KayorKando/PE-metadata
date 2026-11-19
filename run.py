@@ -58,7 +58,7 @@ def main():
     groups = None
     if args.group_cols:
         cols = REQUESTED_COLS if args.group_cols == ["requested"] else args.group_cols
-        groups = df[cols].astype(str).agg("|".join, axis=1).to_numpy()
+        groups = np.array(["|".join(map(str, r)) for r in df[cols].itertuples(index=False)])   # NaN-safe (pandas 3)
         sizes = pd.Series(groups).value_counts()
         print(f"groups: {len(sizes)} distinct over {len(df)} rows; "
               f"{int((sizes > 1).sum())} groups have >1 row (max {sizes.max()}); "

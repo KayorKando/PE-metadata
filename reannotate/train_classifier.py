@@ -56,6 +56,13 @@ def labels_from_map(df):
     return {a: np.where(missing, None, lab[a]) for a in ATTRS}
 
 
+def group_keys(df, cols):
+    """One string per row joining the requested-metadata columns (rows from one prompt share it). Built with str() per
+    value: under pandas 3, DataFrame.astype(str) keeps NaN as a float, and "|".join then fails (OpenReview eps = inf:
+    the private labels used as metadata have NaN in primary_strength / primary_weakness)."""
+    return np.array(["|".join(map(str, r)) for r in df[cols].itertuples(index=False)])
+
+
 def group_split(groups, seed, frac=(0.7, 0.15)):
     rng = np.random.default_rng(seed)
     _, inv = np.unique(groups, return_inverse=True)
@@ -479,7 +486,7 @@ def main():
 
     pool = pd.read_csv(args.pool_qwen)
     lab_pool = labels_from_map(pool)
-    groups = pool[[c for c in REQUESTED_COLS if c in pool]].astype(str).agg("|".join, axis=1).to_numpy()
+    groups = group_keys(pool, [c for c in REQUESTED_COLS if c in pool])
     tr, va, te = group_split(groups, args.seed)
 
     priv = pd.read_csv(args.private_csv)

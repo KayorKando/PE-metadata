@@ -30,7 +30,7 @@ sys.path.insert(0, str(REPO))
 from blindness.experiment import split_halves  # noqa: E402
 from blindness.metrics import knn_kappa, knn_neighbors  # noqa: E402
 from blindness.schema import word_count_bin  # noqa: E402
-from reannotate.train_classifier import (HF_MODELS, REQUESTED_COLS, confusion, embed_frozen_bert,  # noqa: E402
+from reannotate.train_classifier import (HF_MODELS, REQUESTED_COLS, confusion, embed_frozen_bert, group_keys,  # noqa: E402
                                          embed_phi, evaluate, group_split, labels_from_map)
 from vote_embedding.train_embedder import ATTRS, LOSSES  # noqa: E402
 
@@ -178,7 +178,7 @@ def main(argv=None):
     pool = pd.read_csv(args.pool_qwen)
     texts = pool["text"].astype(str).tolist()
     y_pool = labels_from_map(pool)
-    groups = pool[[c for c in REQUESTED_COLS if c in pool]].astype(str).agg("|".join, axis=1).to_numpy()
+    groups = group_keys(pool, [c for c in REQUESTED_COLS if c in pool])
     tr, va, te = group_split(groups, args.seed)
     labelled = np.array([y_pool[ATTRS[0]][i] is not None for i in range(len(pool))])  # missing = whole row
     te, va = te[labelled[te]], va[labelled[va]]

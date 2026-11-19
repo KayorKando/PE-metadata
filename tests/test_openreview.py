@@ -51,6 +51,15 @@ def test_num_sample_per_id_matches_maple():
         assert list(a) == list(b) and all(a[k] == b[k] for k in a) and sum(a.values()) == 2000
 
 
+def test_group_keys_with_nan():
+    """pandas 3: DataFrame.astype(str) keeps NaN as float; the old "|".join over it raised TypeError (job 482577)."""
+    import pandas as pd
+    from reannotate.train_classifier import group_keys
+    df = pd.DataFrame({"a": ["x", np.nan, "x"], "b": [1.0, 2.0, 1.0], "c": ["u", "v", "u"]})
+    k = group_keys(df, ["a", "b", "c"])
+    assert list(k) == ["x|1.0|u", "nan|2.0|v", "x|1.0|u"]
+
+
 def test_class_vote_only_within_class():
     X_priv = np.array([[0.0, 0], [10, 10], [10.2, 10]], np.float32)
     g_priv = np.array([0, 1, 1])

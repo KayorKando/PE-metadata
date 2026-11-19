@@ -8,7 +8,8 @@
 #   2. MAPLE's openreview/ folder (CSVs, AIM metadata, MAPLE.py, PE.py): copied from GitHub if the clone lacks it
 #   3. model weights into /work/$USER/hf_cache: SciBERT (ft vote backbone), gte-base-en-v1.5 (MAUVE encoder, with
 #      its remote code), plus sentence-t5-base and Qwen if missing; then an offline load check
-# Check `hfsquota` first: the two new models are ~1 GB together.
+# Check `hfsquota` first: the two new models are ~1 GB together (PyTorch weights only; python openreview/hf_cache_slim.py
+# removes ONNX / Flax / TF copies an earlier full download left in the cache).
 set -eo pipefail
 WORK=/work/$USER
 SRC=${SRC:-$WORK/PE-metadata}              # the bioRxiv data root (holds the MAPLE clone)
@@ -53,9 +54,12 @@ conda activate "$WORK/envs/${MAPLE_ENV_NAME:-maple}"
 python - "$QWEN" <<'PY'
 import sys
 from huggingface_hub import snapshot_download
+# PyTorch weights only: gte's repo also has 1.6 GB of ONNX files, SciBERT's a Flax copy (/work quota is 100 GB)
+torch_only = ["*.json", "*.txt", "*.py", "*.model", "*.safetensors", "pytorch_model.bin", "*/*.json", "*/*.safetensors",
+              "*/pytorch_model.bin"]
 for repo in ["allenai/scibert_scivocab_uncased", "Alibaba-NLP/gte-base-en-v1.5", "sentence-transformers/sentence-t5-base",
              sys.argv[1]]:
-    print("ok", repo, "->", snapshot_download(repo))
+    print("ok", repo, "->", snapshot_download(repo, allow_patterns=torch_only))
 PY
 # gte's modeling code lives in another repo (Alibaba-NLP/new-impl): one online load caches it for the offline jobs
 python -c "from transformers import AutoModel, AutoTokenizer; AutoTokenizer.from_pretrained('Alibaba-NLP/gte-base-en-v1.5'); AutoModel.from_pretrained('Alibaba-NLP/gte-base-en-v1.5', trust_remote_code=True); print('gte remote code cached')"

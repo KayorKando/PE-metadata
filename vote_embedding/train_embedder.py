@@ -51,7 +51,7 @@ sys.path.insert(0, str(REPO))
 from blindness.schema import SCHEMA  # noqa: E402
 from pe_data import FT_BACKBONE  # noqa: E402
 from reannotate.train_classifier import (FineTuned, HF_MODELS, REQUESTED_COLS,  # noqa: E402
-                                         group_split, labels_from_map)
+                                         group_keys, group_split, labels_from_map)
 
 ATTRS = list(SCHEMA)                  # the content attributes of the active dataset (no word_count)
 SIGMA = 0.05
@@ -386,7 +386,7 @@ def main():
     t0 = time.time()
     pool = pd.read_csv(args.pool_qwen)
     lab = labels_from_map(pool)
-    groups = pool[[c for c in REQUESTED_COLS if c in pool]].astype(str).agg("|".join, axis=1).to_numpy()
+    groups = group_keys(pool, [c for c in REQUESTED_COLS if c in pool])
     tr, va, te = group_split(groups, args.seed)
     # classes absent from the training split get no proxy (as FineTuned)
     classes = {a: sorted(set(v for v in lab[a][tr] if v is not None)) for a in ATTRS}

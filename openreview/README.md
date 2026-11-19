@@ -30,6 +30,7 @@ in the prompt; the label enters only through the per-id vote (Aug-PE's paper put
 cd ~/PE-metadata && git pull
 hfsquota                                       # /work limit 100 GB; OpenReview adds ~5-10 GB
 bash openreview/nano5_setup.sh                 # once: /work/$USER/PE-openreview, MAPLE/openreview, SciBERT, gte
+python3 openreview/hf_cache_slim.py --delete  # frees ONNX / Flax copies in hf_cache (gte 1.6 GB, SciBERT 0.4 GB)
 
 export PE_DATASET=openreview NANO5_DATA=/work/$USER/PE-openreview      # every command below needs these two
 
