@@ -1,7 +1,8 @@
 """Re-annotating, step 2: label texts with a local Qwen (vLLM) as the annotator.
 
 Uses MAPLE's own annotation prompt (the one behind the Gemini labels of the
-private data) and constrains the output to the MAPLE schema with vLLM guided
+private data; OpenReview: pe_data.openreview_prompt, as MAPLE ships none)
+and constrains the output to the schema with vLLM guided
 JSON decoding, so every label is a valid option. Output format matches
 annotate_gemini.py: the input CSV plus map_<attribute> columns.
 
@@ -23,10 +24,11 @@ import pandas as pd
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from annotate_gemini import ATTRS, load_maple_prompt  # noqa: E402
-from blindness.schema import BIORXIV_SCHEMA  # noqa: E402
+from blindness.schema import SCHEMA as LABELS  # noqa: E402  (active dataset, PE_DATASET)
+from pe_data import ANNOT_MAX_TOKENS  # noqa: E402
 
 SCHEMA = {"type": "object",
-          "properties": {a: {"type": "string", "enum": BIORXIV_SCHEMA[a]} for a in ATTRS},
+          "properties": {a: {"type": "string", "enum": LABELS[a]} for a in ATTRS},
           "required": ATTRS, "additionalProperties": False}
 
 
@@ -61,7 +63,7 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
     p.add_argument("--temperature", type=float, default=0.0, help="0 = greedy, stable labels")
-    p.add_argument("--max_tokens", type=int, default=512)
+    p.add_argument("--max_tokens", type=int, default=ANNOT_MAX_TOKENS, help="512 bioRxiv, 768 OpenReview")
     p.add_argument("--max_model_len", type=int, default=8192)
     p.add_argument("--sample", type=int, default=0, help="random sample of N rows (0 = all)")
     p.add_argument("--seed", type=int, default=0)

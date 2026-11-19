@@ -9,7 +9,10 @@ Featurizers (--model):
   gpt2-large (default)  last-token hidden state of the final layer, max 1024 tokens: the featurizer of
                         the original MAUVE paper (Pillutla et al., 2021) and of the mauve-text package
   sentence-t5-base      as in quota_pe.py (sanity check: must reproduce the stored `mauve`)
-  other HF encoders     mean-pooled last hidden state, max 512 tokens
+  Alibaba-NLP/gte-base-en-v1.5   [CLS] state, max 2048 tokens (the model takes 8192; OpenReview reviews stay
+                        under ~1,600), trust_remote_code: the neutral encoder for OpenReview (no review-specific
+                        encoder exists; not sentence-t5, the t5 vote, nor SciBERT, the ft backbone)
+  other HF encoders     mean-pooled last hidden state, max 512 tokens (--pooling, --max_len override)
 
 --length_match: before scoring, subsample each round's survivors so that their length distribution (50-word
 bins, as jsd_word_count) matches the test set's, then score; tag gets "-lenmatch". If the arms keep their
@@ -44,10 +47,15 @@ def tag_of(model):
     return model.rstrip("/").split("/")[-1]
 
 
+# encoders with their own pooling / context (by tag); anything else: mean pooling, 512 tokens
+ENCODERS = {"gte-base-en-v1.5": dict(pooling="cls", max_len=2048, trust_remote_code=True)}
+
+
 class Featurizer:
-    def __init__(self, model, batch=16, device=None):
+    def __init__(self, model, batch=16, device=None, pooling=None, max_len=None):
         import torch
         self.torch, self.model_name, self.batch = torch, model, batch
+        self.key_extra = ""      # part of the feature-cache key; empty for the original featurizers
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.kind = "gpt2" if "gpt2" in model else ("st" if "sentence-t5" in model else "enc")
         if self.kind == "st":
@@ -59,12 +67,20 @@ class Featurizer:
                 self.st_cpu.max_seq_length = 1024
             return
         from transformers import AutoModel, AutoTokenizer
-        self.tok = AutoTokenizer.from_pretrained(model)
+        cfg = ENCODERS.get(tag_of(model), {}) if self.kind == "enc" else {}
+        trust = cfg.get("trust_remote_code", False)
+        self.tok = AutoTokenizer.from_pretrained(model, trust_remote_code=trust)
         if self.tok.pad_token is None:
             self.tok.pad_token = self.tok.eos_token
         self.tok.padding_side = "right"
         self.max_len = 1024 if self.kind == "gpt2" else 512
-        self.net = AutoModel.from_pretrained(model).to(self.device).eval()  # fp32, as mauve-text
+        self.pooling = "last" if self.kind == "gpt2" else "mean"
+        if self.kind == "enc":
+            self.pooling = pooling or cfg.get("pooling", "mean")
+            self.max_len = max_len or cfg.get("max_len", 512)
+            if (self.pooling, self.max_len) != ("mean", 512):
+                self.key_extra = f"|{self.pooling}|{self.max_len}"
+        self.net = AutoModel.from_pretrained(model, trust_remote_code=trust).to(self.device).eval()  # fp32, as mauve-text
 
     def __call__(self, texts):
         texts = [str(t) for t in texts]
@@ -84,6 +100,8 @@ class Featurizer:
                 m = enc["attention_mask"]
                 if self.kind == "gpt2":               # hidden state of the last real token
                     f = h[torch.arange(len(idx), device=h.device), m.sum(1) - 1]
+                elif self.pooling == "cls":           # first token ([CLS]); padding is on the right
+                    f = h[:, 0]
                 else:
                     mf = m.unsqueeze(-1).float()
                     f = (h * mf).sum(1) / mf.sum(1).clamp(min=1.0)
@@ -98,7 +116,8 @@ class Featurizer:
 
 def cached(feat, texts, cache_dir):
     from blindness.embed import save_atomic
-    key = hashlib.sha1(("\n".join(map(str, texts)) + feat.model_name + "mauve").encode()).hexdigest()[:16]
+    key = hashlib.sha1(("\n".join(map(str, texts)) + feat.model_name + getattr(feat, "key_extra", "") + "mauve")
+                       .encode()).hexdigest()[:16]
     path = Path(cache_dir) / f"mauvefeat_{tag_of(feat.model_name)}_{key}.npy"
     if path.exists():
         return np.load(path)
@@ -149,6 +168,8 @@ def main():
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--length_match", action="store_true", help="length-matched subsample of the survivors")
     p.add_argument("--match_n", type=int, default=500, help="with --length_match: rows scored per round (all arms)")
+    p.add_argument("--pooling", default=None, choices=["mean", "cls"], help="HF encoders: override the pooling")
+    p.add_argument("--max_len", type=int, default=None, help="HF encoders: override the token limit")
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--num_shards", type=int, default=1)
     args = p.parse_args()
@@ -176,7 +197,7 @@ def main():
           flush=True)
     if not todo:
         return
-    feat = Featurizer(args.model, args.batch)
+    feat = Featurizer(args.model, args.batch, pooling=args.pooling, max_len=args.max_len)
     test = pd.read_csv(args.test_ref)
     X_test = cached(feat, test["text"].astype(str).tolist(), cache_dir)
     for d, t in todo:

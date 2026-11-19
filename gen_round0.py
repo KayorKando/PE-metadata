@@ -19,24 +19,50 @@ Run inside MAPLE's environment (vllm + private-evolution). Example, two GPUs:
 Output columns: the 9 requested (AIM) metadata values, plus `text`.
 `word_count` is the REQUESTED length; it is copied to `word_count_requested`
 because run.py recomputes `word_count` from the generated text.
+
+OpenReview (PE_DATASET=openreview): MAPLE's openreview/MAPLE/MAPLE.py round 0. In-context examples = one
+validation review per PE.LABEL_ID + one more at random (50), 10 picked per prompt by Hamming distance;
+metadata rows sampled per label id from the AIM file ((L + 1) K_g rows for id g, K_g from the private label
+counts, pe_data.num_sample_per_id). The pool keeps PE.LABEL_ID (the class-conditional vote needs it) and
+the 8 metadata columns of MAPLE's OpenReview prompt.
 """
 import argparse
 import os
+import random
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-METADATA = ["primary_research_area", "model_organism", "experimental_approach", "dominant_data_type",
-            "research_focus_scale", "disease_mention", "sample_size", "research_goal", "word_count"]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import pe_data  # noqa: E402
+from pe_data import CLASS_CONDITIONAL, LABEL_ID, METADATA  # noqa: E402
 
 
-def train_file(maple_dir, eps):
-    d = Path(maple_dir) / "biorxiv"
-    if eps == "inf":  # true labels of the private set: non-private, for comparison only
-        return d / "biorxiv_train_metadata.csv"
-    return d / f"biorxiv_train_metadata_aim_eps{float(eps):.1f}_(1,9).csv"
+def in_context_examples(maple_dir, num_incontext):
+    """bioRxiv: the first num_incontext validation rows (MAPLE). OpenReview: one validation review per label id
+    plus one more at random (MAPLE openreview/MAPLE/MAPLE.py; uses the global numpy / random state)."""
+    df_val = pe_data.load_val(maple_dir)
+    if not CLASS_CONDITIONAL:
+        idx = list(range(num_incontext))
+    else:
+        first = list(df_val.groupby(LABEL_ID).sample(n=1).index)
+        rest = list(set(df_val.index) - set(first))
+        idx = first + [random.choice(rest)]
+    return [(df_val.loc[i, METADATA].to_dict(), df_val.loc[i, "text"]) for i in idx]
+
+
+def round0_metadata(maple_dir, eps, num_syn, L_random):
+    """Metadata rows of the round-0 prompts, sampled as MAPLE does (one label id 0 for bioRxiv)."""
+    from util import sample_metadata_for_randomapi  # noqa: E402  (MAPLE's util.py)
+    df_trn = pe_data.load_aim(maple_dir, eps)
+    if not CLASS_CONDITIONAL:
+        df_trn[LABEL_ID] = 0
+        return sample_metadata_for_randomapi(df_trn[[LABEL_ID] + METADATA], [0], {0: num_syn}, L_random + 1)
+    priv_ids = pe_data.load_private(maple_dir)[LABEL_ID]
+    k = pe_data.num_sample_per_id(priv_ids, num_syn)
+    return sample_metadata_for_randomapi(df_trn[[LABEL_ID] + METADATA], list(set(priv_ids)), k, L_random + 1)
 
 
 def main():
@@ -69,23 +95,19 @@ def main():
         print(f"merged {len(pool)} rows -> {out / 'pool.csv'}  (empty texts: {int(empty.sum())})")
         return
 
-    maple_code = Path(args.maple_dir) / "biorxiv" / "MAPLE"
-    sys.path.insert(0, str(maple_code))
+    pe_data.check_data_root()
+    sys.path.insert(0, str(pe_data.maple_code(args.maple_dir)))
     from vllm import SamplingParams  # noqa: E402
     from MAPLE import API  # noqa: E402  (MAPLE's own prompt + RANDOM_API)
-    from util import sample_metadata_for_randomapi, set_seed  # noqa: E402
+    from util import set_seed  # noqa: E402
 
     set_seed(args.rng_seed)
 
-    # Public in-context examples: first num_incontext rows of the validation set, as in MAPLE.
-    df_val = pd.read_csv(Path(args.maple_dir) / "biorxiv" / "biorxiv_valid_metadata.csv")
-    examples = [(df_val.loc[i, METADATA].to_dict(), df_val.loc[i, "text"]) for i in range(args.num_incontext)]
+    # Public in-context examples from the validation set, as in MAPLE.
+    examples = in_context_examples(args.maple_dir, args.num_incontext)
 
     # AIM metadata, sampled exactly as MAPLE's round 0 does (same seed -> same rows in every shard).
-    df_trn = pd.read_csv(train_file(args.maple_dir, args.eps))
-    df_trn["PE.LABEL_ID"] = 0
-    df_trn = df_trn[["PE.LABEL_ID"] + METADATA]
-    meta = sample_metadata_for_randomapi(df_trn, [0], {0: args.num_syn}, args.L_random + 1)
+    meta = round0_metadata(args.maple_dir, args.eps, args.num_syn, args.L_random)
     meta["pool_index"] = np.arange(len(meta))
 
     shard = meta.iloc[args.shard::args.num_shards].copy().reset_index(drop=True)
@@ -99,7 +121,7 @@ def main():
 
     shard["word_count_requested"] = shard["word_count"]
     path = out / f"pool_shard{args.shard}of{args.num_shards}.csv"
-    shard.drop(columns=["PE.LABEL_ID"]).to_csv(path, index=False)
+    (shard if CLASS_CONDITIONAL else shard.drop(columns=[LABEL_ID])).to_csv(path, index=False)
     print(f"saved {len(shard)} rows -> {path}")
 
 

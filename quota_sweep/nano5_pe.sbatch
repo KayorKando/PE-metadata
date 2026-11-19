@@ -20,7 +20,8 @@ ENV_NAME=${MAPLE_ENV_NAME:-maple}
 REPO=${SLURM_SUBMIT_DIR:-$PWD}
 cd "$REPO"
 source quota_sweep/nano5_lib.sh
-export PE_DATA=${NANO5_DATA:-/work/$USER/PE-metadata} HF_HOME=/work/$USER/hf_cache PYTHONUNBUFFERED=1
+export PE_DATASET=${PE_DATASET:-biorxiv}
+export PE_DATA=$(nano5_data) HF_HOME=/work/$USER/hf_cache PYTHONUNBUFFERED=1
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1                  # compute nodes have no internet
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ROOT=$PE_DATA/quota_sweep/eps$EPS
@@ -29,8 +30,9 @@ IFS=';' read -ra runs <<< "${RUNS:?RUNS not set: submit with quota_sweep/nano5_p
 IFS=',' read -ra gpus <<< "${CUDA_VISIBLE_DEVICES:-$(seq -s, 0 $((${#runs[@]} - 1)))}"
 [ "${#gpus[@]}" -ge "${#runs[@]}" ] || { echo "${#runs[@]} runs but only ${#gpus[@]} GPUs"; exit 1; }
 threads=$(( ${SLURM_CPUS_PER_TASK:-$((8 * ${#runs[@]}))} / ${#runs[@]} ))
+dataset_flags "$PE_DATA"
 
-echo "===== Job ${SLURM_JOB_ID:-?}: ${#runs[@]} run(s) on GPUs ${gpus[*]}, start @ $(date) on $(hostname)," \
+echo "===== Job ${SLURM_JOB_ID:-?} ($PE_DATASET, eps $EPS): ${#runs[@]} run(s) on GPUs ${gpus[*]}, start @ $(date) on $(hostname)," \
      "repo $(git rev-parse --short HEAD 2>/dev/null) ====="
 nvidia-smi -L
 module load miniconda3/24.11.1
@@ -51,7 +53,8 @@ for i in "${!runs[@]}"; do
   echo "[$(date '+%T')] start $RUN_DIR on GPU ${gpus[$i]} -> $log"
   CUDA_VISIBLE_DEVICES=${gpus[$i]} OMP_NUM_THREADS=$threads python quota_sweep/quota_pe.py --maple_dir "$PE_DATA/MAPLE" \
     --pool_csv "$PE_DATA/round0/eps$EPS/pool.csv" --eps "$EPS" --lam "$lam" --loop_annotator "$RUN_ANN" --seed "$seed" \
-    --test_ref "$PE_DATA/quota_sweep/test_ref_qwen.csv" --out "$out" "${vflags[@]}" "${aflags[@]}" $EXTRA > "$log" 2>&1 &
+    --test_ref "$PE_DATA/quota_sweep/test_ref_qwen.csv" --out "$out" "${vflags[@]}" "${aflags[@]}" "${DATASET_FLAGS[@]}" \
+    $EXTRA > "$log" 2>&1 &
   pids+=($!); names+=("$RUN_DIR")
 done
 fail=0

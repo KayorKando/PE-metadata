@@ -13,8 +13,8 @@
 # Same recipe as the main ft embedder (train_embedder.py defaults); only the backbone or the seed changes:
 #   ftt5     backbone sentence-transformers/sentence-t5-base (MAPLE's own vote embedding, fine-tuned)
 #   ftt5_lr<X>  the same with backbone learning rate X (heads 10x), e.g. ftt5_lr1e-4
-#   fts<N>   BiomedBERT, --seed N (changes the 70/15/15 split and the init)
-#   ft       BiomedBERT, seed 0 (the main embedder; normally already trained by nano5_check.sbatch)
+#   fts<N>   BiomedBERT (OpenReview: SciBERT), --seed N (changes the 70/15/15 split and the init)
+#   ft       BiomedBERT (OpenReview: SciBERT), seed 0 (the main embedder; normally trained by the prep job)
 # From the repo root:   VARIANTS="ftt5 fts1 fts2" sbatch vote_embedding/nano5_train.sbatch
 #                       EPS=2.0 VARIANTS=ft sbatch ...      (pool_qwen.csv of that eps must exist)
 # Already trained variants (heads.pt present) are skipped. Then submit PE runs with AFTER=<this job id>.
@@ -31,7 +31,8 @@ nvidia-smi -L
 module load miniconda3/24.11.1
 eval "$(conda shell.bash hook)"
 conda activate "/work/$USER/envs/$ENV_NAME"
-export PYTHONUNBUFFERED=1 PE_DATA=${NANO5_DATA:-/work/$USER/PE-metadata} HF_HOME=/work/$USER/hf_cache
+export PE_DATASET=${PE_DATASET:-biorxiv}      # OpenReview: ft = SciBERT (train_embedder.py default per dataset)
+export PYTHONUNBUFFERED=1 PE_DATA=$(nano5_data) HF_HOME=/work/$USER/hf_cache
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1          # compute nodes have no internet
 POOL=$PE_DATA/reannotate/eps$EPS/pool_qwen.csv
 [ -s "$POOL" ] || { echo "missing $POOL"; exit 1; }

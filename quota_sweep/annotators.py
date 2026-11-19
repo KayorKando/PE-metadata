@@ -7,7 +7,8 @@ word_count is never annotated: it is always measured from the text (free, exact)
 
 Available:
   inherited   labels = the requested AIM metadata carried by each row (MAPLE's default;
-              variations inherit their parent's metadata). No model call.
+              variations inherit their parent's metadata). No model call. Attributes the rows do not
+              carry (OpenReview: the five that are not AIM metadata) are MISSING ("__missing__").
   qwen        local Qwen via vLLM, MAPLE's annotation prompt, guided JSON over the schema,
               greedy. Treated as the ground-truth annotator for now. Shares the generator's
               vLLM engine when given one (no second model in memory); caches by text, so
@@ -27,10 +28,18 @@ import pandas as pd
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-from blindness.schema import BIORXIV_SCHEMA, clean_labels, word_count_bin  # noqa: E402
+from blindness.schema import SCHEMA, clean_labels, word_count_bin  # noqa: E402
+from pe_data import ANNOT_MAX_TOKENS  # noqa: E402
 
-CONTENT = list(BIORXIV_SCHEMA)
+CONTENT = list(SCHEMA)          # content attributes of the active dataset (PE_DATASET)
 ATTRS = CONTENT + ["word_count"]
+MISSING = "__missing__"         # = vote_correction.MISSING: left out of every JSD
+
+
+def inherited_labels(df):
+    """Schema-cleaned labels of the metadata columns df carries; MISSING for the content attributes it lacks."""
+    out = clean_labels(df, [a for a in CONTENT if a in df])
+    return {a: out[a] if a in out else np.full(len(df), MISSING, dtype=object) for a in CONTENT}
 
 
 class Annotator:
@@ -50,13 +59,13 @@ class InheritedAnnotator(Annotator):
     name = "inherited"
 
     def _label_content(self, texts, df):
-        return clean_labels(df, CONTENT)
+        return inherited_labels(df)
 
 
 class QwenAnnotator(Annotator):
     name = "qwen"
 
-    def __init__(self, maple_dir, llm=None, model="Qwen/Qwen2.5-7B-Instruct", max_tokens=512):
+    def __init__(self, maple_dir, llm=None, model="Qwen/Qwen2.5-7B-Instruct", max_tokens=ANNOT_MAX_TOKENS):
         from transformers import AutoTokenizer
         from vllm import LLM, SamplingParams
         from annotate_gemini import load_maple_prompt
@@ -100,7 +109,7 @@ class ClassifierAnnotator(Annotator):
         print("classifier annotator:", self.models, flush=True)
 
     def _label_content(self, texts, df):
-        out = clean_labels(df, CONTENT)  # inherited, replaced below for the classified attributes
+        out = inherited_labels(df)  # inherited, replaced below for the classified attributes
         for a, f in self.pred.items():
             out[a] = clean_labels(pd.DataFrame({a: f(texts)}), [a])[a]
         return out

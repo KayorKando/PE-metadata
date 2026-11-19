@@ -158,13 +158,15 @@ def select_raked(scores, labels, attrs, p_marg, lam, K, eps=0.05):
     q = largest_remainder(w, K)
     q = {c: min(k, avail[c]) for c, k in q.items()}          # rounding can still overshoot by 1
     chosen = np.zeros(len(scores), bool)
-    short = 0
     for c, k in q.items():
         if k == 0:
             continue
         idx = order[keys[order] == c][:k]
         chosen[idx] = True
-        short += k - len(idx)
+    # water-filling: slots lost to the caps (or to target values no candidate has) go to the best remaining
+    # candidates, so exactly min(K, #candidates) survive (before 2026-11-19 these slots were dropped: up to ~4%
+    # fewer survivors at lambda = 1)
+    short = max(0, min(K, len(scores)) - int(chosen.sum()))
     if short > 0:
         chosen[order[~chosen[order]][:short]] = True
     sel = order[chosen[order]]

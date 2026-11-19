@@ -140,9 +140,9 @@ def main():
         print("no runs yet"); return
     R.to_csv(root / "sweep_rounds.csv", index=False)
     last = R.sort_values("round").groupby(["annotator", "lam", "seed"]).tail(1)
-    keys = KEYS + extra_mauve(R)
+    keys = KEYS + [k for k in ["jsd_label_mean"] if k in R] + extra_mauve(R)   # label mean: OpenReview
     jsd_cols = sorted(c for c in R.columns if c.startswith("jsd_") and not c.startswith("jsd_gemini")
-                      and c not in KEYS)
+                      and c not in keys)
     g = last.groupby(["annotator", "lam"])
     F = g[keys + jsd_cols + ["round"]].mean().reset_index()
     sd = g[keys].std().reset_index().rename(columns={k: k + "_sd" for k in keys})

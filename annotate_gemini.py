@@ -34,13 +34,19 @@ from pathlib import Path
 
 import pandas as pd
 
-ATTRS = ["primary_research_area", "model_organism", "experimental_approach", "dominant_data_type",
-         "research_focus_scale", "disease_mention", "sample_size", "research_goal"]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from blindness.schema import DATASET, SCHEMA  # noqa: E402
+
+ATTRS = list(SCHEMA)   # the content attributes of the active dataset (PE_DATASET); bioRxiv: MAPLE's 8
 
 
 def load_maple_prompt(maple_dir):
     """Take annotate_features_prompt from MAPLE's script without importing it
-    (importing would need the deprecated google.generativeai package)."""
+    (importing would need the deprecated google.generativeai package).
+    OpenReview: MAPLE ships no annotation prompt; pe_data.openreview_prompt is used instead."""
+    if DATASET == "openreview":
+        from pe_data import openreview_prompt
+        return lambda text: openreview_prompt(text)
     path = Path(maple_dir) / "biorxiv" / "utility_eval" / "extract_metadata.py"
     tree = ast.parse(path.read_text())
     fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "annotate_features_prompt")

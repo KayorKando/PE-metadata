@@ -21,6 +21,11 @@ Measured (same definitions as quota_pe.py, so the two can be compared directly):
     before any vote (prior.csv, prior_metrics.json). Drift toward the LLM prior shows as jsd_prior falling
     while jsd (vs real) rises.
 
+OpenReview (PE_DATASET=openreview): MAPLE's openreview/MAPLE/PE.py. The prompts carry no label either, but the vote
+is class-conditional: the round-0 pool has (L + 1) K_g texts per PE.LABEL_ID g (K_g from the private label counts,
+pe_data.num_sample_per_id), private reviews vote only for candidates of their own label id, K_g survivors are kept
+per id, and variations inherit the id. eps -> (T, sigma) from that main_experiment.sh (eps 4: T = 9, sigma = 3.001).
+
 Output in --out: pool.csv (round-0 pool), prior.csv, prior_metrics.json, round_<t>.csv (text, vote, eval_<attr>),
 metrics.jsonl, qwen_cache.csv, config.json, DONE. Resumable after the last finished round.
 mauve_rescore.py works on these run dirs (--root $PE_DATA/augpe/eps4.0 --runs "seed*").
@@ -41,13 +46,15 @@ import pandas as pd
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
+import pe_data  # noqa: E402
+from blindness.schema import DATASET  # noqa: E402
+from pe_data import CLASS_CONDITIONAL, LABEL_ATTRS, LABEL_ID  # noqa: E402
 from quota_sweep.annotators import ATTRS, CONTENT  # noqa: E402
 from vote_correction import jsd  # noqa: E402
 
-# MAPLE main_experiment.sh, PE.py (AugPE) runs: eps -> (PE_T, noise multiplier)
-EPS_SETTINGS = {"4.0": (9, 3.214362874574832), "2.0": (9, 5.872135064401613), "1.0": (9, 10.889585799108582),
-                "inf": (9, 0.0)}
-BLIND = ["word_count", "sample_size", "dominant_data_type"]   # the MAPLE runs' B (Experiment 1)
+# MAPLE main_experiment.sh, PE.py (AugPE) runs: eps -> (PE_T, noise multiplier), per dataset (pe_data)
+EPS_SETTINGS = pe_data.AUGPE_EPS_SETTINGS
+BLIND = pe_data.DEFAULT_BLIND   # bioRxiv: the MAPLE runs' B (Experiment 1); OpenReview: --blind_json
 
 
 def top_k(hist, K):
@@ -63,17 +70,20 @@ def round_metrics(ev, ref, gem=None, prior=None, blind=BLIND):
         m.update({f"jsd_gemini_{a}": jsd(ev[a], gem[a]) for a in CONTENT})
     m["jsd_mean"] = float(np.mean([m[f"jsd_{a}"] for a in ATTRS]))
     m["jsd_blind_mean"] = float(np.mean([m[f"jsd_{a}"] for a in blind]))
-    m["jsd_other_mean"] = float(np.mean([m[f"jsd_{a}"] for a in ATTRS if a not in blind]))
+    m["jsd_other_mean"] = float(np.mean([m[f"jsd_{a}"] for a in ATTRS if a not in blind and a not in LABEL_ATTRS]))
+    if LABEL_ATTRS:
+        m["jsd_label_mean"] = float(np.mean([m[f"jsd_{a}"] for a in LABEL_ATTRS]))
     if prior is not None:
         m.update({f"jsd_prior_{a}": jsd(ev[a], prior[a]) for a in ATTRS})
         m["jsd_prior_blind_mean"] = float(np.mean([m[f"jsd_prior_{a}"] for a in blind]))
-        m["jsd_prior_other_mean"] = float(np.mean([m[f"jsd_prior_{a}"] for a in ATTRS if a not in blind]))
+        m["jsd_prior_other_mean"] = float(np.mean([m[f"jsd_prior_{a}"] for a in ATTRS
+                                                   if a not in blind and a not in LABEL_ATTRS]))
     return m
 
 
 def load_augpe_prompts(maple_dir):
-    """create_review_generation_prompt / create_review_variation_prompt from MAPLE's biorxiv/MAPLE/PE.py."""
-    code = Path(maple_dir) / "biorxiv" / "MAPLE"
+    """create_review_generation_prompt / create_review_variation_prompt from MAPLE's <dataset>/MAPLE/PE.py."""
+    code = pe_data.maple_code(maple_dir)
     sys.path.insert(0, str(code))                       # PE.py does `from util import ...`
     spec = importlib.util.spec_from_file_location("maple_augpe", code / "PE.py")
     mod = importlib.util.module_from_spec(spec)
@@ -92,21 +102,25 @@ def main():
     p.add_argument("--L", type=int, default=6, help="MAPLE PE_L_random")
     p.add_argument("--T", type=int, default=None, help="override the number of PE rounds for this eps")
     p.add_argument("--noise", type=float, default=None, help="override the noise multiplier for this eps")
-    p.add_argument("--blind", nargs="+", default=BLIND)
+    p.add_argument("--blind", nargs="+", default=None, help="default: bioRxiv's B; OpenReview: --blind_json")
+    p.add_argument("--blind_json", default=None, help="blind.json from blindness/pick_blind.py (if no --blind)")
     p.add_argument("--prior_n", type=int, default=2000, help="round-0 texts labelled as the LLM-prior reference")
     p.add_argument("--model_id", default="Qwen/Qwen2.5-7B-Instruct")
     p.add_argument("--gpu_mem", type=float, default=0.5, help="vLLM gpu_memory_utilization; the rest is sentence-t5")
     p.add_argument("--emb_batch", type=int, default=32)
     args = p.parse_args()
+    from quota_sweep.quota_pe import load_blind
+    args.blind = load_blind(args.blind, args.blind_json)
+    pe_data.check_data_root()
 
     T, sigma = EPS_SETTINGS[args.eps]
     T = args.T if args.T is not None else T
     sigma = args.noise if args.noise is not None else sigma
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "config.json").write_text(json.dumps({**vars(args), "method": "augpe", "T": T, "sigma": sigma}, indent=2))
+    (out / "config.json").write_text(json.dumps({**vars(args), "method": "augpe", "dataset": DATASET, "T": T,
+                                                 "sigma": sigma}, indent=2))
     data_root = Path(os.environ.get("PE_DATA", "."))
-    bio = Path(args.maple_dir) / "biorxiv"
     test_path = Path(args.test_ref)
     if not test_path.exists():
         raise SystemExit(f"missing {test_path}: build it with quota_sweep/quota_pe.py --prep_only")
@@ -119,7 +133,6 @@ def main():
     from quota_sweep.quota_pe import Embedder, load_mauve
     from blindness.embed import embed
     from blindness.schema import clean_labels
-    from vote_correction import nearest_pool_index
 
     set_seed(42 + args.seed)
     rng = np.random.default_rng(args.seed)
@@ -139,8 +152,10 @@ def main():
         return [o.outputs[0].text for o in llm.generate(prompts, sp, use_tqdm=False)]
 
     # --- private voters (sentence-t5, max_seq 1024, as MAPLE's Aug-PE) and the test reference ---
-    priv = pd.read_csv(bio / "biorxiv_train_metadata.csv")
-    priv = priv[priv["text"].notna()].reset_index(drop=True)
+    priv = pe_data.load_private(args.maple_dir)
+    priv_groups = priv[LABEL_ID].to_numpy() if CLASS_CONDITIONAL else None
+    k_per_class = pe_data.num_sample_per_id(priv_groups, args.K) if CLASS_CONDITIONAL else None
+    group = [LABEL_ID] if CLASS_CONDITIONAL else []          # columns a text carries besides "text"
     X_priv = embed(priv["text"].astype(str).tolist(), "sentence-t5-base", 1024, batch_size=args.emb_batch,
                    cache_dir=str(data_root / "cache"))
     test = pd.read_csv(test_path)
@@ -154,6 +169,8 @@ def main():
         t0 = time.time()
         n = args.K * (args.L + 1)
         pool = pd.DataFrame({"text": generate([chat(gen_prompt({}, [], 0))] * n)})
+        if CLASS_CONDITIONAL:     # MAPLE PE.py: (L + 1) K_g prompts per label id (the prompt has no label)
+            pool.insert(0, LABEL_ID, np.repeat(list(k_per_class), [(args.L + 1) * k for k in k_per_class.values()]))
         pool.to_csv(pool_path, index=False)
         print(f"round-0 pool: {n} texts in {time.time() - t0:.0f} s", flush=True)
     pool = pd.read_csv(pool_path)
@@ -190,19 +207,23 @@ def main():
     for t in range(start, T + 1):
         t0 = time.time()
         if t == 0:
-            cand = pool[["text"]].copy()
+            cand = pool[group + ["text"]].copy()
         else:
-            survivors = sel_df[["text"]]
+            survivors = sel_df[group + ["text"]]
             var = pd.concat([survivors] * args.L, ignore_index=True)
             var["text"] = generate([chat(var_prompt({}, s, [])) for s in var["text"].astype(str)])
             cand = pd.concat([survivors, var], ignore_index=True)
         cand = cand[cand["text"].notna() & (cand["text"].astype(str).str.strip() != "")].reset_index(drop=True)
         Xc = emb(cand["text"].astype(str).tolist())
-        hist = np.bincount(nearest_pool_index(X_priv, Xc), minlength=len(cand)).astype(float)
+        cand_groups = cand[LABEL_ID].to_numpy() if CLASS_CONDITIONAL else None
+        hist = pe_data.class_vote(X_priv, priv_groups, Xc, cand_groups)
         noise = rng.normal(size=args.K * (args.L + 1))   # fixed length: same stream whatever len(cand) is
         if sigma:
             hist = hist + sigma * np.resize(noise, len(cand))
-        sel = top_k(hist, args.K)
+        if CLASS_CONDITIONAL:      # K_g survivors per label id (MAPLE PE.py: per-id top-K, then concat)
+            sel = pe_data.select_per_class(hist, cand_groups, k_per_class, lambda s, ci, k: (top_k(s, k), {}))[0]
+        else:
+            sel = top_k(hist, args.K)
         sel_df = cand.iloc[sel].reset_index(drop=True)
         sel_df["vote"] = hist[sel]
         ev = ann.label(sel_df)

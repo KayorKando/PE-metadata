@@ -1,7 +1,7 @@
 """Vote embedding, step 1: fine-tune BiomedBERT once on the round-0 pool with Qwen labels,
 so that the embedding (heads removed) can replace sentence-t5 as the PE vote embedding.
 
-Model (one shared backbone for all 8 content attributes of BIORXIV_SCHEMA):
+Model (one shared backbone for all content attributes of the schema: bioRxiv 8, OpenReview 12):
   z = mean of the last hidden states over real tokens (as embed_frozen_bert)
   --loss normsoftmax (Zhai & Wu, BMVC 2019):
       x = LN(z) / ||LN(z)||   (LayerNorm without affine; no new FC layer)
@@ -10,7 +10,7 @@ Model (one shared backbone for all 8 content attributes of BIORXIV_SCHEMA):
       cosine geometry the loss organises; logits are bounded by +-1/sigma = +-20.
   --loss ce (control arm, the "just use a linear classifier" idea):
       logit_a = W_a z + b_a on the un-normalised mean-pool; vote with z.
-Backbone: any HF encoder (default BiomedBERT), or a T5 encoder, e.g. --model
+Backbone: any HF encoder (default BiomedBERT; OpenReview: SciBERT, pe_data.FT_BACKBONE), or a T5 encoder, e.g. --model
 sentence-transformers/sentence-t5-base (the "ft-t5" arm: fine-tune MAPLE's own vote embedding, so the
 vote and MAUVE start from the same space). For a sentence-transformers repo, its Dense layer after the
 mean-pool (sentence-t5: 768 -> 768, identity activation) is kept, so at init z equals sentence-t5's
@@ -48,11 +48,12 @@ from sklearn.metrics import cohen_kappa_score
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-from blindness.schema import BIORXIV_SCHEMA  # noqa: E402
+from blindness.schema import SCHEMA  # noqa: E402
+from pe_data import FT_BACKBONE  # noqa: E402
 from reannotate.train_classifier import (FineTuned, HF_MODELS, REQUESTED_COLS,  # noqa: E402
                                          group_split, labels_from_map)
 
-ATTRS = list(BIORXIV_SCHEMA)          # the 8 content attributes (no word_count)
+ATTRS = list(SCHEMA)                  # the content attributes of the active dataset (no word_count)
 SIGMA = 0.05
 LOSSES = ("normsoftmax", "ce")
 MISSING = -1                          # label index for "no label" (or class unseen in train)
@@ -365,8 +366,9 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--pool_qwen", required=True, help="annotate_qwen.py output on the round-0 pool")
     p.add_argument("--loss", default="normsoftmax", choices=LOSSES)
-    p.add_argument("--model", default=HF_MODELS["biomedbert"],
-                   help="HF backbone name or local path; sentence-transformers/sentence-t5-base for the ft-t5 arm")
+    p.add_argument("--model", default=HF_MODELS[FT_BACKBONE],
+                   help="HF backbone name or local path (default: BiomedBERT for bioRxiv, SciBERT for OpenReview); "
+                        "sentence-transformers/sentence-t5-base for the ft-t5 arm")
     p.add_argument("--out", default=None, help="default $PE_DATA/vote_embedding/eps<eps>/<loss>")
     p.add_argument("--eps", default="4.0")
     p.add_argument("--sigma", type=float, default=SIGMA)

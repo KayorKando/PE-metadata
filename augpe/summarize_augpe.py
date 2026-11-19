@@ -27,8 +27,8 @@ import pandas as pd
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-ATTRS = ["primary_research_area", "model_organism", "experimental_approach", "dominant_data_type",
-         "research_focus_scale", "disease_mention", "sample_size", "research_goal", "word_count"]
+from blindness.schema import ATTRIBUTES as ATTRS  # noqa: E402  (active dataset, PE_DATASET; + word_count)
+
 MAIN = ["mauve", "jsd_blind_mean", "jsd_other_mean", "jsd_mean"]
 
 
@@ -93,7 +93,7 @@ def change(R, method="augpe", start=0):
     """JSD(last round) - JSD(round `start`) per attribute, paired by seed."""
     A = R[(R.method == method) & (R["round"] >= start)]
     rows = []
-    for key in [f"jsd_{a}" for a in ATTRS] + ["jsd_blind_mean", "jsd_other_mean", "mauve"]:
+    for key in [f"jsd_{a}" for a in ATTRS] + ["jsd_blind_mean", "jsd_other_mean", "jsd_label_mean", "mauve"]:
         if key not in A:
             continue
         d = []
@@ -119,7 +119,8 @@ def write_md(R, S, C, path):
     lines = ["# Metadata drift: Aug-PE vs MAPLE (t5 vote, lambda = 0)", "",
              "Mean ± sd over seeds. Round -1 = Aug-PE's round-0 pool before any vote (the LLM prior).", ""]
     rounds = sorted(S["round"].unique())
-    for metric in MAIN + [c for c in sorted(S.metric.unique()) if c.startswith("mauve_")]:
+    main = MAIN + [k for k in ["jsd_label_mean"] if k in set(S.metric)]
+    for metric in main + [c for c in sorted(S.metric.unique()) if c.startswith("mauve_")]:
         lines += [f"## {metric}", "", "| round | Aug-PE | MAPLE |", "|---|---|---|"]
         lines += [f"| {t} | {fmt(S, 'augpe', metric, t)} | {fmt(S, 'maple', metric, t)} |" for t in rounds]
         lines.append("")
@@ -170,7 +171,11 @@ def plot(S, out):
     fig.savefig(Path(out) / "drift_curves.png", dpi=160)
     plt.close(fig)
 
-    fig, axes = plt.subplots(3, 3, figsize=(10.5, 8.5))
+    ncol = 3 if len(ATTRS) <= 9 else 4
+    nrow = int(np.ceil(len(ATTRS) / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(3.5 * ncol, 2.85 * nrow), squeeze=False)
+    for ax in axes.flat[len(ATTRS):]:
+        ax.set_visible(False)
     for ax, a in zip(axes.flat, ATTRS):
         curve(ax, f"jsd_{a}")
     axes.flat[0].legend(fontsize=7)

@@ -1,9 +1,15 @@
-"""bioRxiv metadata schema (MAPLE, Listing 1) and label cleaning.
+"""Metadata schemas (MAPLE: bioRxiv Listing 1, OpenReview Listing 2) and label cleaning.
 
 The Gemini annotations in MAPLE's CSV contain off-schema values
 (e.g. "Psychology" for primary_research_area). We map each value to the
 schema: exact match, then prefix match, then the attribute's fallback.
+
+Which dataset a process works on is set by the environment variable PE_DATASET
+(biorxiv, the default, or openreview). SCHEMA / FALLBACK / ATTRIBUTES and clean_labels
+follow it; BIORXIV_SCHEMA and OPENREVIEW_SCHEMA are always the fixed dicts.
 """
+import os
+
 import numpy as np
 import pandas as pd
 
@@ -54,11 +60,91 @@ BIORXIV_SCHEMA = {
         "Evaluating/Comparing approaches", "Other",
     ],
 }
-FALLBACK = {k: "Other" for k in BIORXIV_SCHEMA}
-FALLBACK["sample_size"] = "Not Specified / Not Applicable"
+BIORXIV_FALLBACK = {k: "Other" for k in BIORXIV_SCHEMA}
+BIORXIV_FALLBACK["sample_size"] = "Not Specified / Not Applicable"
 
 # The 9 attributes MAPLE uses (PE.py: METADATA).
 BIORXIV_ATTRIBUTES = list(BIORXIV_SCHEMA) + ["word_count"]
+
+# OpenReview (ICLR 2023 reviews). area ... keywords_group_3: MAPLE Listing 2 (the AIM attributes), with "Other"
+# added to primary_strength / primary_weakness (Gemini uses it). The other five attributes are in MAPLE's CSVs
+# but not in Listing 2; their options are the values of MAPLE's Gemini labels (train set), one-off values dropped.
+OPENREVIEW_SCHEMA = {
+    "area": [
+        "Deep Learning and representational learning",
+        "Applications (eg, speech processing, computer vision, NLP)",
+        "Reinforcement Learning (eg, decision and control, planning, hierarchical RL, robotics)",
+        "Neuroscience and Cognitive Science (e.g., neural coding, brain-computer interfaces)",
+        "Probabilistic Methods (eg, variational inference, causal inference, Gaussian processes)",
+        "Social Aspects of Machine Learning (eg, AI safety, fairness, privacy, interpretability, human-AI interaction, ethics)",
+        "Unsupervised and Self-supervised learning",
+        "Machine Learning for Sciences (eg biology, physics, health sciences, social sciences, climate/sustainability )",
+        "General Machine Learning",
+        "Theory (eg, control theory, learning theory, algorithmic game theory)",
+        "Generative models",
+        "Optimization (eg, convex and non-convex optimization)",
+    ],
+    "recommendation": [
+        "6: marginally above the acceptance threshold", "3: reject, not good enough",
+        "5: marginally below the acceptance threshold", "8: accept, good paper", "1: strong reject",
+    ],
+    "primary_contribution_type": [
+        "New Algorithm/Method", "Theoretical Analysis", "Empirical Study/Ablation", "New Benchmark/Dataset",
+        "Position/Survey Paper", "Other",
+    ],
+    "primary_strength": [
+        "Novelty/Originality of Idea", "Strong Empirical Performance", "Significant Problem or Application",
+        "High-Quality Presentation/Clarity", "Solid Theoretical Guarantees",
+        "Good Reproducibility (Code/Data Provided)", "Other",
+    ],
+    "primary_weakness": [
+        "Insufficient/Flawed Experiments", "Weak or Missing Baselines", "Lack of Novelty",
+        "Unclear/Poor Presentation", "Flawed Theoretical Claims", "Limited Scope or Impact", "Ethical Concerns",
+        "Other",
+    ],
+    "novelty_assessment": [
+        "Groundbreaking", "Significant Advance", "Incremental Improvement", "Well-Known Concept",
+        "Unclear/Not Discussed",
+    ],
+    "reviewer_tone": [
+        "Enthusiastic/Supportive", "Constructive/Balanced", "Critical/Dismissive", "Formal/Detached",
+    ],
+    "clarity_and_presentation_quality": [
+        "Excellent (Easy to follow)", "Good (Mostly clear)", "Needs Improvement (Key parts are confusing)",
+        "Poor (Very difficult to understand)",
+    ],
+    "actionability_of_feedback": [
+        "Highly Actionable (Specific experiments to run)",
+        "Moderately Actionable (Clarifications or rephrasing needed)",
+        "Low Actionability (Vague or fundamental conceptual issues)",
+    ],
+    "keywords_group_1": [
+        "Large Language Models (LLMs)", "Diffusion Models", "Foundation Models", "Prompting",
+        "Text-to-Image Synthesis", "Transformers", "Self-Supervised Learning (SSL)", "Datasets & Benchmarks",
+        "Data Augmentation", "Other",
+    ],
+    "keywords_group_2": [
+        "Few-Shot & Zero-Shot Learning", "Meta-Learning", "Continual Learning", "Transfer Learning",
+        "Federated Learning", "Graph Neural Networks (GNNs)", "Knowledge Graphs", "Weak Supervision",
+        "Causal Inference", "Other",
+    ],
+    "keywords_group_3": [
+        "Efficiency", "Stochastic Gradient Descent (SGD)", "Model Compression", "Robustness",
+        "Out-of-Distribution (OOD) Generalization", "Fairness & Bias", "Privacy",
+        "Interpretability & Explainability", "Reinforcement Learning (RL)", "Decision Making", "Other",
+    ],
+}
+# "Other" is the fallback everywhere (also where it is not an option: only unparsed annotations land there),
+# except novelty, which has its own "not discussed" option.
+OPENREVIEW_FALLBACK = {k: "Other" for k in OPENREVIEW_SCHEMA}
+OPENREVIEW_FALLBACK["novelty_assessment"] = "Unclear/Not Discussed"
+
+SCHEMAS = {"biorxiv": (BIORXIV_SCHEMA, BIORXIV_FALLBACK), "openreview": (OPENREVIEW_SCHEMA, OPENREVIEW_FALLBACK)}
+DATASET = os.environ.get("PE_DATASET", "biorxiv")
+if DATASET not in SCHEMAS:
+    raise ValueError(f"PE_DATASET={DATASET!r}: expected one of {sorted(SCHEMAS)}")
+SCHEMA, FALLBACK = SCHEMAS[DATASET]
+ATTRIBUTES = list(SCHEMA) + ["word_count"]     # the content attributes of the active dataset + word_count
 
 
 def clean_value(value, options, fallback):
@@ -84,8 +170,8 @@ def clean_labels(df, attributes):
     for a in attributes:
         if a == "word_count":
             out[a] = word_count_bin(df["text"])
-        elif a in BIORXIV_SCHEMA:
-            out[a] = np.array([clean_value(v, BIORXIV_SCHEMA[a], FALLBACK[a]) for v in df[a]])
+        elif a in SCHEMA:
+            out[a] = np.array([clean_value(v, SCHEMA[a], FALLBACK[a]) for v in df[a]])
         else:  # non-schema attribute: use as-is
             out[a] = df[a].astype(str).to_numpy()
     return out

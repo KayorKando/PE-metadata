@@ -39,9 +39,9 @@ from sklearn.metrics import accuracy_score, cohen_kappa_score, f1_score
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-from blindness.schema import BIORXIV_SCHEMA, clean_labels  # noqa: E402
+from blindness.schema import SCHEMA, clean_labels  # noqa: E402
 
-ATTRS = list(BIORXIV_SCHEMA)
+ATTRS = list(SCHEMA)          # content attributes of the active dataset (PE_DATASET)
 HF_MODELS = {"scibert": "allenai/scibert_scivocab_uncased",
              "biomedbert": "microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract"}
 REQUESTED_COLS = ATTRS + ["word_count_requested"]

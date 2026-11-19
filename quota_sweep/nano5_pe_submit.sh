@@ -11,6 +11,8 @@
 # Other settings: ANNOTATOR (classifier), EPS (4.0), TIME per job (02:00:00; a run took ~45 min on the lab GPU,
 # runs of a job go in parallel), CPUS_PER_RUN (8), MEM_PER_RUN (64, GB), PARTITION (normal), EXTRA (quota_pe.py flags).
 # VOTE_EMBS: t5, ft, fts<N> (ft embedder seed N), ftt5 (fine-tuned sentence-t5); see nano5_lib.sh.
+# OpenReview: export PE_DATASET=openreview first (data root /work/$USER/PE-openreview, see openreview/README.md); use
+# ANNOTATOR=qwen for lambda > 0 (Qwen labels in the loop, no classifier). AFTER may list several jobs: AFTER=<id1>:<id2>.
 # Runs land in $PE_DATA/quota_sweep/eps$EPS/<annotator>[-<vemb>]/lam*/, lambda = 0 in maple[-<vemb>]/. Finished runs
 # (DONE) are left out when the jobs are built, unfinished ones resume after their last round: after a
 # TIMEOUT or a failure, rerun the same command and only the missing runs are submitted.
@@ -26,18 +28,23 @@ CPUS_PER_RUN=${CPUS_PER_RUN:-8}
 MEM_PER_RUN=${MEM_PER_RUN:-64}
 AFTER=${AFTER:-}
 PARTITION=${PARTITION:-normal}
-PE_DATA=${NANO5_DATA:-/work/$USER/PE-metadata}
 [ -f quota_sweep/nano5_pe.sbatch ] || { echo "run from the repo root"; exit 1; }
+source quota_sweep/nano5_lib.sh
+export PE_DATASET=${PE_DATASET:-biorxiv}
+PE_DATA=$(nano5_data)
 case $GROUP_BY in run|lam|all) ;; *) echo "GROUP_BY must be run, lam or all"; exit 1;; esac
-for f in round0/eps$EPS/pool.csv quota_sweep/test_ref_qwen.csv MAPLE/biorxiv/biorxiv_train_metadata.csv; do
-  # with AFTER, the round-0 pool may still be made by that job (nano5_prep_eps.sbatch)
-  [ -n "$AFTER" ] && [ "$f" = "round0/eps$EPS/pool.csv" ] && continue
-  [ -s "$PE_DATA/$f" ] || { echo "missing $PE_DATA/$f (see quota_sweep/nano5_pe_setup.sh)"; exit 1; }
+# with AFTER, the prep jobs (nano5_prep_eps.sbatch) may still be making these
+from_prep="round0/eps$EPS/pool.csv"
+[ "$PE_DATASET" = biorxiv ] || from_prep="$from_prep quota_sweep/test_ref_qwen.csv blind.json"
+need="round0/eps$EPS/pool.csv quota_sweep/test_ref_qwen.csv $(private_csv)"
+[ "$PE_DATASET" = biorxiv ] || need="$need blind.json"
+for f in $need; do
+  [ -n "$AFTER" ] && [[ " $from_prep " == *" $f "* ]] && continue
+  [ -s "$PE_DATA/$f" ] || { echo "missing $PE_DATA/$f (see quota_sweep/nano5_pe_setup.sh; OpenReview: openreview/README.md)"; exit 1; }
 done
 nonzero=$(awk -v ls="$LAMS" 'BEGIN { n = split(ls, a, " "); for (i = 1; i <= n; i++) if (a[i] + 0 != 0) { print 1; exit } }')
 [ "$ANNOTATOR" != classifier ] || [ -z "$nonzero" ] || [ -s "$PE_DATA/reannotate/eps$EPS/best_annotator_nano5.json" ] || \
   { echo "missing best_annotator_nano5.json: rerun quota_sweep/nano5_pe_setup.sh after copying the spec"; exit 1; }
-source quota_sweep/nano5_lib.sh
 for v in $VOTE_EMBS; do
   vemb_dir "$v" || exit 1
   [ -z "$VEMB_DIR" ] || [ -n "$AFTER" ] || [ -s "$PE_DATA/vote_embedding/eps$EPS/$VEMB_DIR/heads.pt" ] || \
@@ -58,15 +65,17 @@ done; done; done
 [ ${#order[@]} -gt 0 ] || { echo "nothing to submit: all runs are done"; exit 0; }
 
 dep=(); [ -z "$AFTER" ] || dep=(--dependency=afterok:"$AFTER")
-export ANNOTATOR EPS EXTRA=${EXTRA:-} NANO5_DATA=$PE_DATA     # sbatch passes the environment on
+export ANNOTATOR EPS EXTRA=${EXTRA:-} NANO5_DATA=$PE_DATA PE_DATASET     # sbatch passes the environment on
+echo "dataset $PE_DATASET, data root $PE_DATA, eps $EPS"
 total=0
 for key in "${order[@]}"; do
   IFS=';' read -ra runs <<< "${GROUPS_[$key]}"
   n=${#runs[@]}
   [ "$n" -le 8 ] || { echo "job $key would need $n GPUs (> 8 per node): use a finer GROUP_BY"; exit 1; }
   total=$((total + n))
-  echo "job pe-$key: $n run(s) on $n GPU(s): ${GROUPS_[$key]}"
-  RUNS="${GROUPS_[$key]}" sbatch --job-name="pe-$key" --gres=gpu:"$n" --cpus-per-task=$((CPUS_PER_RUN * n)) \
+  name="pe-$key"; [ "$PE_DATASET" = biorxiv ] || name="$(job_prefix)pe$EPS-$key"     # e.g. or-pe4.0-t5-lam0
+  echo "job $name: $n run(s) on $n GPU(s): ${GROUPS_[$key]}"
+  RUNS="${GROUPS_[$key]}" sbatch --job-name="$name" --gres=gpu:"$n" --cpus-per-task=$((CPUS_PER_RUN * n)) \
     --mem=$((MEM_PER_RUN * n))G --time="$TIME" --partition="$PARTITION" "${dep[@]}" quota_sweep/nano5_pe.sbatch
 done
 echo "${#order[@]} job(s), $total run(s), limit $TIME per job${AFTER:+, after job $AFTER}; at most 2 of your jobs run at a time;" \

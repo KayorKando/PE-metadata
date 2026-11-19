@@ -70,3 +70,20 @@ def test_raking():
 if __name__ == "__main__":
     test_quota()
     test_raking()
+
+
+def test_raked_keeps_exactly_K_when_caps_bind():
+    """Regression (2026-11-19): slots lost to capped cells / target values no candidate has were dropped, so fewer
+    than K survived (bioRxiv lambda = 1 runs had 1,924-1,990 of 2,000 survivors in some rounds)."""
+    from quota_sweep.quota import select_raked
+    rng = np.random.default_rng(0)
+    for seed in range(20):
+        r = np.random.default_rng(seed)
+        n, K = int(r.integers(8, 40)), int(r.integers(2, 8))
+        labs = {"a": r.choice(["x", "y", "z"], n), "b": r.choice(["p", "q"], n)}
+        p_marg = {"a": {"x": .5, "y": .3, "w": .2}, "b": {"p": .9, "q": .1}}
+        for lam in (0.5, 1.0):
+            sel, info = select_raked(r.normal(size=n), labs, ["a", "b"], p_marg, lam, K)
+            assert len(sel) == len(set(sel)) == K
+    sel, _ = select_raked(rng.normal(size=3), {"a": np.array(["x", "y", "x"])}, ["a"], {"a": {"y": 1.0}}, 1.0, 5)
+    assert sorted(sel) == [0, 1, 2]                                    # fewer candidates than K: all of them

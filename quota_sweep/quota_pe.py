@@ -14,6 +14,12 @@ from vote_embedding/train_embedder.py, --vote_emb_path). The vote uses it for bo
 points and the candidates. MAUVE always stays on sentence-t5: with ft, t5 features are computed
 for the K survivors only; with t5 the old code path (Xs = Xc[sel]) is unchanged.
 
+OpenReview (PE_DATASET=openreview): the vote is class-conditional as in MAPLE's openreview/MAPLE/MAPLE.py: private
+reviews vote only for candidates of their own PE.LABEL_ID (area x recommendation), and K_g survivors are kept per
+label id (pe_data.num_sample_per_id, from the private label counts). The quota runs inside each label id, with the
+AIM marginals of that id as its target. Blind attributes come from --blind_json (blindness/pick_blind.py on the
+round-0 pool). area and recommendation are reported as jsd_label_mean and left out of jsd_other_mean.
+
 One GPU per run: vLLM (generation + Qwen annotation share one engine) and sentence-t5.
 Resumable: finished rounds are reloaded and the run continues after the last one.
 
@@ -36,16 +42,16 @@ from scipy.spatial.distance import jensenshannon
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-from blindness.schema import BIORXIV_SCHEMA, clean_labels  # noqa: E402
+import pe_data  # noqa: E402
+from blindness.schema import DATASET, clean_labels  # noqa: E402
+from pe_data import CLASS_CONDITIONAL, EPS_SETTINGS, LABEL_ATTRS, LABEL_ID, METADATA  # noqa: E402
 from quota_sweep.annotators import ATTRS, CONTENT, make_annotator  # noqa: E402
 from quota_sweep.quota import (assign_cells, build_cell_space, build_marginals, cell_keys,  # noqa: E402
                                marginal_jsd, select, select_raked)
-from vote_correction import jsd, nearest_pool_index  # noqa: E402
+from vote_correction import jsd  # noqa: E402
 
-METADATA = CONTENT + ["word_count"]   # MAPLE's 9 metadata columns (word_count = requested length)
-# MAPLE main_experiment.sh, MAPLE.py runs: eps -> (PE_T, noise multiplier)
-EPS_SETTINGS = {"4.0": (4, 2.5787580697142025), "2.0": (4, 4.7482491352519505), "1.0": (2, 6.869194837509232),
-                "inf": (9, 0.0)}
+# METADATA: the columns of MAPLE's prompts (word_count = requested length); EPS_SETTINGS: eps -> (T, noise
+# multiplier) of MAPLE's runs (pe_data, per dataset)
 
 
 def lam_at(t, T, lam, schedule):
@@ -59,7 +65,32 @@ def aim_target_labels(aim_df, blind):
     return lab
 
 
+def load_blind(blind, blind_json, required=True):
+    """--blind, else --blind_json ({"blind": [...]}, blindness/pick_blind.py), else the dataset default
+    ([] when not required: --prep_only builds the test reference before the blind screen has run)."""
+    if blind:
+        return list(blind)
+    if blind_json:
+        return list(json.loads(Path(blind_json).read_text())["blind"])
+    if pe_data.DEFAULT_BLIND:
+        return list(pe_data.DEFAULT_BLIND)
+    if not required:
+        return []
+    raise SystemExit(f"{DATASET}: no default blind attributes; pass --blind or --blind_json (blindness/pick_blind.py)")
+
+
+def metric_means(m, blind):
+    """jsd_mean / jsd_blind_mean / jsd_other_mean (+ jsd_label_mean for the vote's classes) from m['jsd_<attr>']."""
+    m["jsd_mean"] = float(np.mean([m[f"jsd_{a}"] for a in ATTRS]))
+    m["jsd_blind_mean"] = float(np.mean([m[f"jsd_{a}"] for a in blind]))
+    m["jsd_other_mean"] = float(np.mean([m[f"jsd_{a}"] for a in ATTRS if a not in blind and a not in LABEL_ATTRS]))
+    if LABEL_ATTRS:
+        m["jsd_label_mean"] = float(np.mean([m[f"jsd_{a}"] for a in LABEL_ATTRS]))
+    return m
+
+
 def load_mauve(maple_dir):
+    # MAPLE's MAUVE code lives in biorxiv/utility_eval only; it is dataset-independent (features in, score out)
     path = Path(maple_dir) / "biorxiv" / "utility_eval" / "compute_mauve.py"
     spec = importlib.util.spec_from_file_location("maple_compute_mauve", path)
     mod = importlib.util.module_from_spec(spec)
@@ -98,7 +129,9 @@ def main():
     p.add_argument("--lam", type=float, required=True, help="lambda (under --schedule linear: its last-round value)")
     p.add_argument("--schedule", default="constant", choices=["constant", "linear"],
                    help="constant: lambda_t = lam; linear: lambda_t = lam * t / T (0 at round 0)")
-    p.add_argument("--blind", nargs="+", default=["word_count", "sample_size", "dominant_data_type"])
+    p.add_argument("--blind", nargs="+", default=None,
+                   help="blind attributes B (bioRxiv default: word_count sample_size dominant_data_type)")
+    p.add_argument("--blind_json", default=None, help="blind.json from blindness/pick_blind.py (if no --blind)")
     p.add_argument("--cell_mode", default="raking", choices=["raking", "joint"],
                    help="raking (default): quotas from one-way marginals of B via iterative proportional fitting, "
                         "no merged cells; joint: top max_cells joint cells + __other__ (first version)")
@@ -116,13 +149,18 @@ def main():
                    help="vLLM gpu_memory_utilization; the rest is for sentence-t5 + the classifier annotator")
     p.add_argument("--emb_batch", type=int, default=32, help="sentence-t5 (and ft vote embedding) batch size")
     p.add_argument("--vote_emb", default="t5", choices=["t5", "ft"],
-                   help="t5: sentence-t5 (MAPLE); ft: fine-tuned BiomedBERT (vote_embedding/). MAUVE stays on t5")
+                   help="t5: sentence-t5 (MAPLE); ft: fine-tuned BiomedBERT / SciBERT (OpenReview) or sentence-t5 "
+                        "(vote_embedding/). MAUVE stays on t5")
     p.add_argument("--vote_emb_path", default=None,
                    help="trained ft embedder (default $PE_DATA/vote_embedding/eps<eps>/normsoftmax)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", required=True)
     p.add_argument("--prep_only", action="store_true", help="only build --test_ref (labels of the test set), then exit")
     args = p.parse_args()
+    args.blind = load_blind(args.blind, args.blind_json, required=not args.prep_only)
+    if CLASS_CONDITIONAL and args.cell_mode != "raking":
+        p.error("class-conditional datasets support --cell_mode raking only")
+    pe_data.check_data_root()
 
     T, sigma = EPS_SETTINGS[args.eps]
     T = args.T if args.T is not None else T
@@ -132,11 +170,10 @@ def main():
     data_root = Path(os.environ.get("PE_DATA", "."))
     if args.vote_emb == "ft" and args.vote_emb_path is None:
         args.vote_emb_path = str(data_root / "vote_embedding" / f"eps{args.eps}" / "normsoftmax")
-    (out / "config.json").write_text(json.dumps({**vars(args), "T": T, "sigma": sigma}, indent=2))
-    bio = Path(args.maple_dir) / "biorxiv"
+    (out / "config.json").write_text(json.dumps({**vars(args), "dataset": DATASET, "T": T, "sigma": sigma}, indent=2))
 
     # --- MAPLE pieces ---
-    sys.path.insert(0, str(bio / "MAPLE"))
+    sys.path.insert(0, str(pe_data.maple_code(args.maple_dir)))
     from MAPLE import create_review_variation_prompt  # noqa: E402
     from util import SuppressChineseLogitsProcessor, set_seed  # noqa: E402
     from transformers import AutoTokenizer
@@ -162,27 +199,32 @@ def main():
 
     # --- private voters, AIM target over cells of B, test reference ---
     from blindness.embed import embed
-    priv = pd.read_csv(bio / "biorxiv_train_metadata.csv")
-    priv = priv[priv["text"].notna()].reset_index(drop=True)
+    priv = pe_data.load_private(args.maple_dir)
+    priv_groups = priv[LABEL_ID].to_numpy() if CLASS_CONDITIONAL else None
+    k_per_class = pe_data.num_sample_per_id(priv_groups, args.K) if CLASS_CONDITIONAL else None
     if args.vote_emb == "t5":
         X_priv = embed(priv["text"].astype(str).tolist(), "sentence-t5-base", 1024, batch_size=args.emb_batch,  # 256 OOMs next to vLLM on H100 80GB
                        cache_dir=str(data_root / "cache"))
     else:
         X_priv = vemb(priv["text"].astype(str).tolist())  # cached under $PE_DATA/cache
-    aim = pd.read_csv(bio / (f"biorxiv_train_metadata_aim_eps{float(args.eps):.1f}_(1,9).csv"
-                             if args.eps != "inf" else "biorxiv_train_metadata.csv"))
+    aim = pe_data.load_aim(args.maple_dir, args.eps)
     aim_lab = aim_target_labels(aim, args.blind)
     p_marg = build_marginals(aim_lab, args.blind)
     kept, p_hat = build_cell_space(aim_lab, args.blind, args.max_cells) if args.cell_mode == "joint" else (None, None)
+    p_marg_class = None          # class-conditional: the quota target of label id g = AIM marginals within g
+    if CLASS_CONDITIONAL:
+        aim_ids = aim[LABEL_ID].to_numpy()
+        p_marg_class = {g: build_marginals({a: v[aim_ids == g] for a, v in aim_lab.items()}, args.blind)
+                        for g in k_per_class if (aim_ids == g).any()}
     (out / "cells.json").write_text(json.dumps({"blind": args.blind, "cell_mode": args.cell_mode,
-                                                "p_marg": p_marg, "p_hat": p_hat}, indent=2))
+                                                "p_marg": p_marg, "p_hat": p_hat, "k_per_class": k_per_class,
+                                                "p_marg_class": p_marg_class}, indent=2, default=str))
 
     test_path = Path(args.test_ref)
     if test_path.exists():
         test = pd.read_csv(test_path)
     else:
-        test = pd.read_csv(bio / "biorxiv_test_metadata.csv")
-        test = test[test["text"].notna()].reset_index(drop=True)
+        test = pe_data.load_test(args.maple_dir)
         tl = eval_ann.label(test)
         for a in ATTRS:
             test[f"ref_{a}"] = tl[a]
@@ -208,22 +250,26 @@ def main():
         sel_df = pd.read_csv(out / f"round_{start - 1}.csv")
         print(f"resuming after round {start - 1}", flush=True)
 
+    keep = METADATA + ([LABEL_ID] if CLASS_CONDITIONAL else []) + ["text"]   # what a variation inherits
+
     def variations(sel_df):
-        var = pd.concat([sel_df[METADATA + ["text"]]] * args.L, ignore_index=True)
+        var = pd.concat([sel_df[keep]] * args.L, ignore_index=True)
         prompts = [tok.apply_chat_template(create_review_variation_prompt(r[METADATA].to_dict(), r["text"], []),
                                            tokenize=False, add_generation_prompt=True) for _, r in var.iterrows()]
         outs = llm.generate(prompts, var_sp, use_tqdm=False)
         var["text"] = [o.outputs[0].text for o in outs]
-        return pd.concat([sel_df[METADATA + ["text"]], var], ignore_index=True)
+        return pd.concat([sel_df[keep], var], ignore_index=True)
 
     for t in range(start, T + 1):
         t0 = time.time()
         if cand is None:
             cand = variations(sel_df)
         cand = cand[cand["text"].astype(str).str.strip() != ""].reset_index(drop=True)
-        # vote
-        Xc = vemb(cand["text"].astype(str).tolist())
-        hist = np.bincount(nearest_pool_index(X_priv, Xc), minlength=len(cand)).astype(float)
+        # vote (candidates' ft embeddings are not written to the disk cache: a new set every round)
+        ctexts = cand["text"].astype(str).tolist()
+        Xc = vemb.encode(ctexts)[0] if hasattr(vemb, "encode") else vemb(ctexts)
+        cand_groups = cand[LABEL_ID].to_numpy() if CLASS_CONDITIONAL else None
+        hist = pe_data.class_vote(X_priv, priv_groups, Xc, cand_groups)
         if sigma:
             hist = hist + rng.normal(scale=sigma, size=len(hist))
         # quota selection on loop labels
@@ -232,6 +278,11 @@ def main():
         if args.cell_mode == "joint":
             cells = assign_cells(lab, args.blind, kept)
             sel, info = select(hist, cells, p_hat, lam_t, args.K)
+        elif CLASS_CONDITIONAL:          # quota inside each label id, K_g survivors each (MAPLE's per-id top-K)
+            cells = cell_keys(lab, args.blind)
+            sel, info = pe_data.select_per_class(hist, cand_groups, k_per_class, lambda s, ci, k: select_raked(
+                s, {a: lab[a][ci] for a in args.blind}, args.blind,
+                p_marg_class.get(cand_groups[ci[0]], p_marg), lam_t, k))
         else:
             cells = cell_keys(lab, args.blind)
             sel, info = select_raked(hist, lab, args.blind, p_marg, lam_t, args.K)
@@ -251,9 +302,7 @@ def main():
             m[f"jsd_{a}"] = jsd(ev[a], ref[a])
         for a in CONTENT:
             m[f"jsd_gemini_{a}"] = jsd(ev[a], gem[a])
-        m["jsd_mean"] = float(np.mean([m[f"jsd_{a}"] for a in ATTRS]))
-        m["jsd_blind_mean"] = float(np.mean([m[f"jsd_{a}"] for a in args.blind]))
-        m["jsd_other_mean"] = float(np.mean([m[f"jsd_{a}"] for a in ATTRS if a not in args.blind]))
+        metric_means(m, args.blind)
         for src, labs in [("loop", lab), ("eval", ev)]:
             sl = {a: (labs[a][sel] if src == "loop" else labs[a]) for a in args.blind}
             mj = marginal_jsd(sl, args.blind, p_marg)

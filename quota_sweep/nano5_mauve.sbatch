@@ -25,14 +25,16 @@ RUNS_GLOB=${RUNS_GLOB:-*/lam*}
 ENV_NAME=${MAPLE_ENV_NAME:-maple}
 REPO=${SLURM_SUBMIT_DIR:-$PWD}
 cd "$REPO"
-export PE_DATA=${NANO5_DATA:-/work/$USER/PE-metadata} HF_HOME=/work/$USER/hf_cache PYTHONUNBUFFERED=1
+source quota_sweep/nano5_lib.sh
+export PE_DATASET=${PE_DATASET:-biorxiv}     # OpenReview: MODEL=Alibaba-NLP/gte-base-en-v1.5 (see openreview/README.md)
+export PE_DATA=$(nano5_data) HF_HOME=/work/$USER/hf_cache PYTHONUNBUFFERED=1
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 ROOT=${MAUVE_ROOT:-$PE_DATA/quota_sweep/eps$EPS}       # MAUVE_ROOT: other run trees, e.g. $PE_DATA/augpe/eps4.0
 LOGDIR=/work/$USER/logs; mkdir -p "$LOGDIR"
 IFS=',' read -ra gpus <<< "${CUDA_VISIBLE_DEVICES:-0}"
 n=${#gpus[@]}
 threads=$(( ${SLURM_CPUS_PER_TASK:-$((8 * n))} / n ))
-echo "===== Job ${SLURM_JOB_ID:-?}: MAUVE with $MODEL on $ROOT/$RUNS_GLOB, $n shard(s), start @ $(date) on $(hostname) ====="
+echo "===== Job ${SLURM_JOB_ID:-?} ($PE_DATASET): MAUVE with $MODEL on $ROOT/$RUNS_GLOB, $n shard(s), start @ $(date) on $(hostname) ====="
 module load miniconda3/24.11.1
 eval "$(conda shell.bash hook)"
 conda activate "/work/$USER/envs/$ENV_NAME"

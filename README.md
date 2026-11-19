@@ -2,6 +2,9 @@
 
 Metadata drift in Private Evolution (follow-up to [MAPLE](https://github.com/elichien-google/MAPLE)).
 
+Second dataset (OpenReview): set `PE_DATASET=openreview`; setup, differences and Nano5 commands in
+[openreview/README.md](openreview/README.md). bioRxiv is the default.
+
 ## Experiment 1: k-NN blindness vs. linear probe
 
 **Question.** For each metadata attribute, does the vote embedding φ see it?
